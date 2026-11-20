@@ -2454,6 +2454,12 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if module is None:
                 raise RuntimeError(f"Module {moduleName} is not loaded")
             panel = module.widgetRepresentation()
+            try:    # the embedded module's own extension banner (PET4D) is not shown inside Mergen
+                banner = getattr(panel.self(), "banner", None)
+                if banner is not None:
+                    banner.hide()
+            except Exception:       # noqa: BLE001 - panels without a Python widget
+                pass
             self.embedded[key] = panel
         if self.stack.indexOf(panel) < 0:
             self.stack.addWidget(panel)
