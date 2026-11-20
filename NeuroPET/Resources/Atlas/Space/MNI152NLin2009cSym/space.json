@@ -1,0 +1,8 @@
+{
+  "name": "MNI ICBM 152 2009c nonlinear symmetric",
+  "voxelSizeMm": [1.0, 1.0, 1.0],
+  "dimensions": [193, 229, 193],
+  "description": "The template space of the Neuro workflows (1 mm). The extension brings the T1 template, the brain mask and the grey / white matter probability maps; T2, PD, CSF and a CT template (CT, with CT_GM) can be added in the user's atlas folder under the same space folder name.",
+  "url": "https://nist.mni.mcgill.ca/icbm-152-nonlinear-atlases-2009/",
+  "sources": ["icbm152"]
+}

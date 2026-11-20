@@ -1,0 +1,9 @@
+{
+  "name": "CerebrA PET",
+  "space": "MNI152NLin2009cSym",
+  "voxelSizeMm": [1.0, 1.0, 1.0],
+  "dimensions": [193, 229, 193],
+  "description": "Regions for PET made from CerebrA with pons: the caudate edited by hand (the left one mirrored), cortical regions grown 3 mm and the cingulate, insula, basal ganglia, thalamus, amygdala and hippocampus 2 mm into the white matter and the unlabelled brain. Use with 0 mm growth.",
+  "recommendedGrowMm": 0.0,
+  "sources": ["icbm152", "cerebra", "cerebraPet"]
+}

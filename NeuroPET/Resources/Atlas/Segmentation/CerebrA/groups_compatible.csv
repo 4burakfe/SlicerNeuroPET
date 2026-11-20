@@ -1,0 +1,19 @@
+Group;Structures;Sides;Notes
+Prefrontal Lateral;Rostral Middle Frontal, Caudal Middle Frontal, Pars Opercularis, Pars Triangularis, Pars Orbitalis, Lateral Orbitofrontal;;dorsolateral prefrontal, inferior frontal gyrus, lateral orbitofrontal
+Prefrontal Medial;Superior Frontal, Medial Orbitofrontal;;CerebrA Superior Frontal also covers the dorsal convexity (not split)
+Sensorimotor;Precentral, Postcentral, Paracentral;;
+Anterior Cingulate;Rostral Anterior Cingulate, Caudal Anterior Cingulate;;
+Posterior Cingulate;Posterior Cingulate;;CerebrA Posterior Cingulate only (mostly mid-cingulate); Isthmus Cingulate a region of its own
+Isthmus Cingulate;Isthmus Cingulate;;retrosplenial tail of the cingulate, kept apart from Posterior Cingulate (not a CortexID region)
+Precuneus;Precuneus;;
+Parietal Superior;Superior Parietal;;
+Parietal Inferior;Inferior Parietal, Supramarginal;;angular and supramarginal gyri
+Occipital Lateral;Lateral Occipital;;
+Primary Visual;Pericalcarine, Cuneus, Lingual;;CerebrA has no V1 label: calcarine banks with cuneus and lingual (medial occipital)
+Temporal Lateral;Superior Temporal, Middle Temporal, Inferior temporal, Transverse Temporal, Fusiform;;fusiform (basal temporal) included
+Temporal Mesial;Hippocampus, Amygdala, Parahippocampal, Entorhinal;;
+Insula;Insula;;not a CortexID region
+Basal Ganglia;Caudate, Putamen, Pallidum, Accumbens Area;;not a CortexID region
+Thalamus;Thalamus;;not a CortexID region
+Cerebellum Whole;Cerebellum Gray Matter, Cerebellum White Matter, Vermal lobules I-V, Vermal lobules VI-VII, Vermal lobules VIII-X;merged;both hemispheres and the vermis, one region
+Pons;Pons;merged;CerebrA with pons only
