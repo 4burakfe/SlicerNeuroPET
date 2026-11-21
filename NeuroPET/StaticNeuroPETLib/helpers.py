@@ -8,7 +8,7 @@ import numpy as np
 import qt
 import slicer
 
-from DynamicNeuroPET import REFERENCE_SUFFIX, STEP_DATA, STEP_NORM, STEP_REG, STEP_REGIONS, _badgePixmap
+from NeuroWorkflowLib.base import REFERENCE_SUFFIX, STEP_DATA, STEP_NORM, STEP_REG, STEP_REGIONS, _badgePixmap
 
 from StaticNeuroPETLib.constants import STEP_GLYPH_COLOR, STEP_ICON_SIZE
 

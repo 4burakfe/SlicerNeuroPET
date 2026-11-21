@@ -11,7 +11,7 @@ import os
 import qt
 import slicer
 
-from DynamicNeuroPET import ATLAS_FILE_ATTRIBUTE, DynamicNeuroPETWidget, NEURO_PREFIX, REG_PREFIX, STEP_DATA
+from NeuroWorkflowLib.base import ATLAS_FILE_ATTRIBUTE, NeuroWorkflowWidget, NEURO_PREFIX, REG_PREFIX, STEP_DATA
 from NeuroPETLib import staticneuro as sn
 
 from StaticNeuroPETLib.constants import SETTINGS_IMPORT_FOLDER, WARNING_STYLE
@@ -19,6 +19,9 @@ from StaticNeuroPETLib.constants import SETTINGS_IMPORT_FOLDER, WARNING_STYLE
 
 class DataPageMixin:
     """The page data methods of StaticNeuroPETWidget."""
+
+    IMPORT_FOLDER_SETTING = SETTINGS_IMPORT_FOLDER     # the folder the import dialogs open in
+    BIDS_DYNAMIC = False            # Import BIDS folder takes the static PET / SPECT of the folder
 
     # --- page 1: data --------------------------------------------------------------------------------
     def _buildDataPage(self):
@@ -57,12 +60,10 @@ class DataPageMixin:
                                                    "SPECT (DICOM SPECT reconstruction) of the brain")
         self.sequenceSelector.hideChildNodeTypes = ["vtkMRMLLabelMapVolumeNode"]
         form.addRow("PET / SPECT:", self.sequenceSelector)
-        importButton = qt.QPushButton("Import from file...")
-        importButton.toolTip = ("Load a PET / SPECT image file (NIfTI, NRRD, ...). BIDS names (sub-<id>_ses-<session>_"
-                                "pet.nii.gz) are read with their .json sidecar (tracer, nuclide, units, timing) and "
-                                "the participants.tsv of the dataset (age, sex); a session 'SUV' means SUV units.")
-        importButton.connect("clicked()", self.onImportFile)
-        form.addRow("", importButton)
+        form.addRow("", self._petImportRow("Load a PET / SPECT image file (NIfTI, NRRD, ...). BIDS names (sub-<id>_"
+                                           "ses-<session>_pet.nii.gz) are read with their .json sidecar (tracer, "
+                                           "nuclide, units, timing) and the participants.tsv of the dataset (age, "
+                                           "sex); a session 'SUV' means SUV units."))
         self.sequenceInfo = qt.QLabel()
         self.sequenceInfo.wordWrap = True
         form.addRow(self.sequenceInfo)
@@ -72,6 +73,7 @@ class DataPageMixin:
                                                   "normalized)")
         self.anatomySelector.hideChildNodeTypes = ["vtkMRMLLabelMapVolumeNode"]
         form.addRow("CT / MR:", self.anatomySelector)
+        form.addRow("", self._anatomyImportButton())
         self.anatomyInfo = qt.QLabel()
         self.anatomyInfo.wordWrap = True
         form.addRow(self.anatomyInfo)
@@ -140,13 +142,13 @@ class DataPageMixin:
 
     def onImportFile(self):
         settings = qt.QSettings()
-        folder = str(settings.value(SETTINGS_IMPORT_FOLDER) or "")
+        folder = str(settings.value(self.IMPORT_FOLDER_SETTING) or "")
         paths = qt.QFileDialog.getOpenFileNames(slicer.util.mainWindow(), "Import PET / SPECT image", folder,
                                                 "Images (*.nii *.nii.gz *.nrrd *.nhdr *.mha *.mhd);;All files (*)")
         paths = [str(p) for p in (paths or [])]
         if not paths:
             return
-        settings.setValue(SETTINGS_IMPORT_FOLDER, os.path.dirname(paths[0]))
+        settings.setValue(self.IMPORT_FOLDER_SETTING, os.path.dirname(paths[0]))
         node = None
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
@@ -161,6 +163,21 @@ class DataPageMixin:
             self.sequenceSelector.setCurrentNode(node)
             slicer.util.setSliceViewerLayers(background=node, fit=True)
 
+    def _importPetPath(self, path):
+        """Load the PET / SPECT from a file and pick it (Import BIDS folder); the node, None when it failed."""
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        try:
+            node = self.logic.loadFromFile(path)
+        except Exception as error:
+            logging.exception("Static Neuro: import failed")
+            slicer.util.errorDisplay(f"Could not import the image:\n{error}")
+            return None
+        finally:
+            qt.QApplication.restoreOverrideCursor()
+        self.sequenceSelector.setCurrentNode(node)
+        slicer.util.setSliceViewerLayers(background=node, fit=True)
+        return node
+
     def onDataChanged(self, *args):
         if self._updating:
             return
@@ -168,12 +185,12 @@ class DataPageMixin:
                 self.anatomySelector.currentNode() is not self.anatomy():
             self._clearRegistration()
             self.regUndo = None
-        DynamicNeuroPETWidget.onDataChanged(self, *args)
+        NeuroWorkflowWidget.onDataChanged(self, *args)
         self._databaseKey = None
         self._syncAgeSex()
 
     def _syncDataPage(self):
-        DynamicNeuroPETWidget._syncDataPage(self)
+        NeuroWorkflowWidget._syncDataPage(self)
         self._syncAgeSex()
 
     def _syncAgeSex(self):

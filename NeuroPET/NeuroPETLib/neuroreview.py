@@ -117,13 +117,17 @@ DROPPED_SEGMENT_WORDS = ("optic chiasm",)       # left out of the review (overla
 # Voxel scores
 # ---------------------------------------------------------------------------
 def scoreMask(mean, brainMask=None, fraction=MASK_FRACTION):
-    """Voxels scored: finite database mean above fraction x its maximum, inside brainMask when given (same shape)."""
+    """Voxels scored: finite database mean above fraction x its maximum, inside brainMask when given (same shape).
+    fraction None: no threshold on the mean (the brain mask alone; without one, the mean above 0)."""
     mean = np.asarray(mean, dtype=np.float32)
     finite = np.isfinite(mean)
     if not finite.any():
         return np.zeros(mean.shape, dtype=bool)
-    top = float(np.max(mean[finite]))
-    mask = finite & (mean > fraction * top) if top > 0 else np.zeros(mean.shape, dtype=bool)
+    if fraction is None and brainMask is not None:
+        mask = finite.copy()
+    else:
+        top = float(np.max(mean[finite]))
+        mask = finite & (mean > (fraction or 0.0) * top) if top > 0 else np.zeros(mean.shape, dtype=bool)
     if brainMask is not None:
         brainMask = np.asarray(brainMask)
         if brainMask.shape != mean.shape:

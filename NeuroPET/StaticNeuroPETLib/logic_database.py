@@ -14,7 +14,7 @@ import qt
 import slicer
 
 from DICOMGatedDynamicPETLib import resampling
-from DynamicNeuroPET import DynamicNeuroPETLogic, NEURO_PREFIX, _ijkToRas, _vtkMatrix
+from NeuroWorkflowLib.base import NeuroWorkflowLogic, NEURO_PREFIX, _ijkToRas, _vtkMatrix
 from NeuroPETLib import neuro, normaldb, neuroreview as nr, staticneuro as sn
 
 from StaticNeuroPETLib.constants import SETTINGS_DB_ROOT
@@ -327,17 +327,17 @@ class DatabaseLogicMixin:
                 slicer.mrmlScene.RemoveNode(storage)
 
     def loadAtlasRegions(self, atlas, *args, storedRegions=None, **kwargs):
-        """DynamicNeuroPETLogic.loadAtlasRegions(); storedRegions (path, reference segment name; sn.storedRegions):
+        """NeuroWorkflowLogic.loadAtlasRegions(); storedRegions (path, reference segment name; sn.storedRegions):
         the regions stored with a normal database's statistics are loaded as they are instead."""
         if storedRegions:
             return self.loadStoredRegions(storedRegions[0], storedRegions[1], kwargs.get("target"))
-        return DynamicNeuroPETLogic.loadAtlasRegions(self, atlas, *args, **kwargs)
+        return NeuroWorkflowLogic.loadAtlasRegions(self, atlas, *args, **kwargs)
 
     def loadStoredRegions(self, path, referenceName=None, target=None):
         """The regions stored with a database's statistics (a .seg.nrrd) as a segmentation: a new one, or target
         filled with them. Not tied to the file (never saved back onto the database). Returns (segmentation, reference
         segment ID or None)."""
-        from DynamicNeuroPET import REGIONS_NAME
+        from NeuroWorkflowLib.base import REGIONS_NAME
         scene = slicer.mrmlScene
         loaded = slicer.util.loadSegmentation(path)
         if loaded is None:

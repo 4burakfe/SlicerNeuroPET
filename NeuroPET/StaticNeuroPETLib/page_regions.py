@@ -10,8 +10,8 @@ import logging
 import qt
 import slicer
 
-from DynamicNeuroPET import (DynamicNeuroPETWidget, NEURO_PREFIX, NORM_PATIENT_PET_COLOR_ID,
-                             NORM_TEMPLATE_PET_COLOR_ID, PET_TEMPLATE_ATTRIBUTE)
+from NeuroWorkflowLib.base import (NeuroWorkflowWidget, NEURO_PREFIX, NORM_PATIENT_PET_COLOR_ID,
+                                   NORM_TEMPLATE_PET_COLOR_ID, PET_TEMPLATE_ATTRIBUTE)
 from NeuroPETLib import credits, neuro, normaldb, staticneuro as sn
 
 from StaticNeuroPETLib.constants import (REGIONS_COLUMNS, REGIONS_LAYOUT_ID, REGIONS_ORIENTATIONS,
@@ -23,7 +23,7 @@ class RegionsPageMixin:
 
     # --- page 4: regions (with the database's region settings) ------------------------------------------
     def _buildRegionsPage(self):
-        page = DynamicNeuroPETWidget._buildRegionsPage(self)
+        page = NeuroWorkflowWidget._buildRegionsPage(self)
         box = qt.QGroupBox("Region settings of the normal database")
         form = qt.QFormLayout(box)
         self.regionsDbInfo = qt.QLabel()
@@ -61,7 +61,7 @@ class RegionsPageMixin:
         except Exception:       # noqa: BLE001 - while the page is built
             header = None
         if header is None or not hasattr(self, "unlockCheck") or not self._locked():
-            DynamicNeuroPETWidget._updateRegionsCredits(self)
+            NeuroWorkflowWidget._updateRegionsCredits(self)
             return
         self.regionsCredits.setHtml(credits.regionsHtml(header.get("regionAtlas"),
                                                         normaldb.referenceTitle(header),
@@ -97,7 +97,7 @@ class RegionsPageMixin:
         self._updateDatabaseInfo()
 
     def _regionsArguments(self):
-        arguments = DynamicNeuroPETWidget._regionsArguments(self)
+        arguments = NeuroWorkflowWidget._regionsArguments(self)
         folder = self._database()
         header = self._header(folder)
         if header is None or not self._locked():
@@ -119,7 +119,7 @@ class RegionsPageMixin:
         return arguments
 
     def _updateRegionsPage(self):
-        DynamicNeuroPETWidget._updateRegionsPage(self)
+        NeuroWorkflowWidget._updateRegionsPage(self)
         if hasattr(self, "dbCombo"):
             self._fillDatabases()
             self._applyLock()
@@ -315,5 +315,5 @@ class RegionsPageMixin:
 
 def _windowOf(node):
     """(lower, upper) of a volume's 1st and 99.5th percentiles (the window of the template in the normalization)."""
-    from DynamicNeuroPET import _percentiles
+    from NeuroWorkflowLib.base import _percentiles
     return _percentiles(node)

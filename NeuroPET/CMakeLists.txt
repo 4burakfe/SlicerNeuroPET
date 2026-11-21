@@ -22,11 +22,18 @@ set(NEURO_LIB_SCRIPTS
   NeuroPETLib/templatebuild.py
   )
 
+# the workflow shared by the Dynamic and Static Neuro modules (logic and widget base classes)
+set(NEURO_WORKFLOW_LIB_SCRIPTS
+  NeuroWorkflowLib/__init__.py
+  NeuroWorkflowLib/base.py
+  )
+
 slicerMacroBuildScriptedModule(
   NAME ${NEURO_MODULE_NAME}
   SCRIPTS
     ${NEURO_MODULE_NAME}.py
     ${NEURO_LIB_SCRIPTS}
+    ${NEURO_WORKFLOW_LIB_SCRIPTS}
   RESOURCES
     Resources/Icons/${NEURO_MODULE_NAME}.png
     Resources/Images/banner.jpg

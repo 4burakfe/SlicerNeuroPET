@@ -12,7 +12,7 @@ import qt
 import slicer
 import vtk
 
-from DynamicNeuroPET import _ijkToRas
+from NeuroWorkflowLib.base import _ijkToRas
 from NeuroPETLib import neuroreview as nr, ssp
 
 from StaticNeuroPETLib.constants import CUT_MODEL_ATTRIBUTE, CUT_MODEL_NAME, CUT_UPDATE_DELAY_MS, SSP_CAMERA_DISTANCE

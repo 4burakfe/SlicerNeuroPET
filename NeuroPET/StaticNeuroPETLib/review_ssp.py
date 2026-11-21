@@ -14,7 +14,7 @@ import slicer
 import vtk
 
 from DICOMGatedDynamicPETLib import colormaps
-from DynamicNeuroPET import _button
+from NeuroWorkflowLib.base import _button
 from NeuroPETLib import neuroreview as nr, ssp
 
 from StaticNeuroPETLib.constants import (REVIEW_SSP_PATIENT_COLORMAP, SSP_CAMERA_DISTANCE, SSP_COLOR_NODE,

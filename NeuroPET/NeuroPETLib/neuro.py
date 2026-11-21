@@ -1119,6 +1119,54 @@ def erodeMask(mask, distanceMm, spacing=(1.0, 1.0, 1.0)):
     return mask & (distance > distanceMm + 1e-6)
 
 
+# ---------------------------------------------------------------------------
+# A reference region of the template space, not of a region atlas: the centrum semiovale
+# ---------------------------------------------------------------------------
+# For tracers with specific binding in all grey matter ([11C]UCB-J, synaptic density: the cerebellum is no reference).
+# Listed among the reference regions of every region atlas when the space has its white matter map (WM).
+WHITE_MATTER_REFERENCE = "Centrum Semiovale (white matter)"
+WM_REFERENCE_PROBABILITY = 0.9      # the core of the white matter (MNI white matter probability)
+
+
+def isWhiteMatterReference(name):
+    return str(name or "").strip().lower() == WHITE_MATTER_REFERENCE.lower()
+
+
+def lateralVentricleValues(entries):
+    """Label values of the lateral ventricles (not the inferior horns) in an atlas's entries."""
+    return [v for v, name, _ in entries
+            if "lateral ventricle" in name.lower() and "inferior" not in name.lower()]
+
+
+def whiteMatterReferenceMask(wm, labels, ventricleValues, ijkToRas, brainMask=None,
+                             probability=WM_REFERENCE_PROBABILITY):
+    """The centrum semiovale (boolean, k j i): the cerebral white matter above the top of the lateral ventricles
+    (ventricleValues of labels; superior in RAS through ijkToRas), where the white matter probability wm (stored 0-1,
+    0-100 or 0-255) is at least probability, in no region of the atlas labels (cortex, deep grey matter, cerebellum,
+    brainstem) and in brainMask when given; all on one grid. About 113 ml in MNI 2009c with CerebrA (both sides
+    alike, at least 1 mm and 3.3 mm in the median from the grey matter); erode it for the PET resolution."""
+    wm = np.asarray(wm, dtype=np.float32)
+    labels = np.asarray(labels)
+    if wm.shape != labels.shape:
+        raise ValueError("The white matter map is not on the grid of the region atlas.")
+    top = float(wm.max()) if wm.size else 0.0
+    if top > 1.5:
+        wm = wm / top
+    ventricles = np.isin(labels, list(ventricleValues))
+    if not ventricles.any():
+        raise ValueError("The region atlas has no lateral ventricles (the centrum semiovale lies above them).")
+    matrix = np.asarray(ijkToRas, dtype=float)
+    k, j, i = np.ogrid[0:labels.shape[0], 0:labels.shape[1], 0:labels.shape[2]]
+    superior = (matrix[2, 0] * i + matrix[2, 1] * j + matrix[2, 2] * k + matrix[2, 3]).astype(np.float32)
+    superior = np.broadcast_to(superior, labels.shape)
+    mask = (wm >= probability) & (labels == 0) & (superior > float(superior[ventricles].max()))
+    if brainMask is not None and np.shape(brainMask) == labels.shape:
+        mask &= np.asarray(brainMask) > 0
+    if not mask.any():
+        raise ValueError("The centrum semiovale is empty (no white matter above the lateral ventricles).")
+    return mask
+
+
 NO_GROW_WORDS = ("ventricle", "optic chiasm")       # CSF and the chiasm: never grown
 
 

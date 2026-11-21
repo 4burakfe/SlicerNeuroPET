@@ -10,7 +10,7 @@ import slicer
 import vtk
 
 from DICOMGatedDynamicPETLib import colormaps, colortables
-from DynamicNeuroPET import _ijkToRas, _percentiles, _vtkMatrix
+from NeuroWorkflowLib.base import _ijkToRas, _percentiles, _vtkMatrix
 from NeuroPETLib import neuroreview as nr
 
 from StaticNeuroPETLib.constants import SCORE_COLOR_NODE, STEP_REVIEW

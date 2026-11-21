@@ -15,9 +15,10 @@ import slicer
 import vtk
 
 from DICOMGatedDynamicPETLib import registration as reg
-from DynamicNeuroPET import (METHOD_ANATOMY, METHOD_PET, METHOD_PET_TEMPLATE, NORMALIZATION_ENGINE,
-                             NORMALIZATION_ITERATIVE_DEFORMABLE, NORMALIZATION_ITERATIVE_LINEAR, NORMALIZATION_STEPS,
-                             NORMALIZATION_WORKING_MM, PET_TEMPLATE_ATTRIBUTE, _ijkToRas, _vtkMatrix)
+from NeuroWorkflowLib.base import (METHOD_ANATOMY, METHOD_PET, METHOD_PET_TEMPLATE, NORMALIZATION_ENGINE,
+                                   NORMALIZATION_ITERATIVE_DEFORMABLE, NORMALIZATION_ITERATIVE_LINEAR,
+                                   NORMALIZATION_STEPS, NORMALIZATION_WORKING_MM, PET_TEMPLATE_ATTRIBUTE, _ijkToRas,
+                                   _vtkMatrix)
 from NeuroPETLib import neuro, normaldb, staticneuro as sn, templatebuild as tb
 
 from StaticNeuroPETLib.constants import BATCH_PET_FALLBACK, BATCH_SKIP, NORMALIZATION_ATTRIBUTE, TEMPLATE_KEY_ATTRIBUTE
@@ -81,7 +82,7 @@ class BatchTemplates:
         return self.get(key), None, None
 
     def ctCorrection(self, ctTemplate):
-        """The space's CT template to the space (DynamicNeuroPETLogic.ctTemplateCorrection), once; None without
+        """The space's CT template to the space (NeuroWorkflowLogic.ctTemplateCorrection), once; None without
         the grey matter maps."""
         if self._correction is False:
             self._correction = None

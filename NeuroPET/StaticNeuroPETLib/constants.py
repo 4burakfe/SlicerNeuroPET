@@ -6,8 +6,8 @@ review / 3D-SSP display defaults.
 import os
 
 from DICOMGatedDynamicPETLib import registration as reg
-from DynamicNeuroPET import (METHOD_ANATOMY, METHOD_PET, METHOD_PET_TEMPLATE, NEURO_PREFIX, NORMALIZATION_GRIDS,
-                             STEP_DATA, STEP_NORM, STEP_REG, STEP_REGIONS)
+from NeuroWorkflowLib.base import (METHOD_ANATOMY, METHOD_PET, METHOD_PET_TEMPLATE, NEURO_PREFIX, NORMALIZATION_GRIDS,
+                                   STEP_DATA, STEP_NORM, STEP_REG, STEP_REGIONS)
 from NeuroPETLib import neuroreview as nr
 
 _MODULE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))     # the StaticNeuroPET module folder

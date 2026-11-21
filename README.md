@@ -65,7 +65,16 @@ without, the result is kept, or stay).
 
 1. **Data:** the patient's **dynamic PET** series and the **CT / MR**. The MR contrast is read from the DICOM tags
    (series description, protocol and sequence name, else TR / TE / TI): T1 (MPRAGE, SPGR, BRAVO, TFE, ...), T2
-   (also FLAIR), PD, or CT; it can be set by hand.
+   (also FLAIR), PD, or CT; it can be set by hand. **Patient**: name, ID, age and sex (from the tags; all can be
+   typed). **Import file...** loads a 4D dynamic PET NIfTI with its BIDS `.json` sidecar (frame times, units,
+   tracer) and the dataset's `participants.tsv` (age, sex), as the PET4D DICOM loader loads a series, with its
+   summed image. **Import BIDS folder...** takes a subject or session folder (or the whole dataset, then you pick
+   one): its dynamic PET (several frames) and the CT / MR of the same subject and session (`anat/` or `ct/`: CT,
+   else T1w, T2w, PD). **Import CT/MR file...** loads the CT / MR from a file; the contrast is then read from a
+   BIDS name (`_T1w`, `_T2w`, `_FLAIR`, `_PDw`, `_ct`) or the `.json` sidecar (modality, series description, TR /
+   TE). **Smoothing** (off by default): for a series reconstructed without a post filter, every frame and the
+   summed image are smoothed with a Gaussian (FWHM in mm, default 4) in place when you go on from the Data step, so
+   before the motion correction; once per series (load it again to undo).
 2. **Motion correction** (Dynamic PET Motion Correction).
 3. **CT/MR registration** (Dynamic PET to CT/MR Registration).
 4. **Normalization** to the **MNI ICBM 152 nonlinear symmetric 2009c** template (the method, template and
@@ -97,7 +106,11 @@ without, the result is kept, or stay).
    (structures merged by `groups.csv`) or **Broad (Compatible)** (by `groups_compatible.csv`); a grouping is offered
    only when the segmentation has its table. The **reference region** is any region of the picked segmentation and
    grouping with the sides merged (default: **Cerebellum Gray Matter**, added as *"Cerebellum Gray Matter
-   (reference)"*). Segment names come from the segment names of `labels.seg.nrrd` (*Caudate R*; *Segment_<value>*
+   (reference)"*), or the **Centrum Semiovale (white matter)** of the space: the white matter above the lateral
+   ventricles with a white matter probability of at least 0.9, in no CerebrA region (about 113 ml in MNI 2009c; made
+   from the space's `WM` map and the CerebrA ventricles, whatever segmentation is picked). It is the reference for
+   tracers that bind in all grey matter (synaptic density, [11C]UCB-J: the cerebellum is no reference); erode it a
+   few mm against spill-over. Segment names come from the segment names of `labels.seg.nrrd` (*Caudate R*; *Segment_<value>*
    is read too); the label numbers and the list of regions come from `labels.csv`. The label maps of the groupings are
    made on first use and again whenever the segmentation or a table changes.
    The extension comes with two segmentations:
@@ -188,8 +201,8 @@ a folder in it, named after the database:
   other nuclide or tracer can be typed.
 - **Create new database...**: an empty *user defined* database in a **space** of the atlas library (fixed once
   made). Region atlas: a **segmentation** and its **grouping**. Reference region: **Global** (the space's brain
-  mask), any **region of the segmentation** (sides merged; default *Cerebellum Gray Matter*) or a **custom** mask
-  file; the mask is copied into the database, optionally eroded (mm). Optional age groups (the master mean / SD of
+  mask), any **region of the segmentation** (sides merged; default *Cerebellum Gray Matter*), the **Centrum
+  Semiovale (white matter)** of the space (see the Regions step) or a **custom** mask file; the mask is copied into the database, optionally eroded (mm). Optional age groups (the master mean / SD of
   all subjects is always made) and smoothing (FWHM). Subjects will be added from the Neuro workflows.
 - **Add predefined database...**: a *predefined* database has no subject images, only mean and SD maps: either a
   package (.zip) or the maps picked one by one (master and each age group, with the number of subjects and whether
@@ -292,10 +305,13 @@ step; a step opens at its top. Without a CT / MR, Next goes from the data straig
 
 1. **Data**: the static PET (loaded by the PET4D DICOM plugin, SUV expected; Bq/ml gives a warning, ratio values are
    not affected) or SPECT (from the DICOM SPECT reconstruction module: counts, Bq/ml or SUV), and optionally the
-   patient's CT / MR. Modality, units, nuclide and tracer are read from the tags of the loaders. **Import from
+   patient's CT / MR. Modality, units, nuclide and tracer are read from the tags of the loaders. **Import
    file...** loads an image file; BIDS names such as `sub-00000016_ses-SUV_pet.nii.gz` are read with their `.json`
    sidecar (tracer, nuclide, units, timing) and the `participants.tsv` of the dataset (age, sex); a session or
-   acquisition named `SUV...` means SUV units. **Patient**: the **name and patient ID** (from the DICOM tags or
+   acquisition named `SUV...` means SUV units. **Import BIDS folder...** takes a subject or session folder (or the
+   dataset, then you pick one): its static PET (one frame, or no frame timing) and the CT / MR of the same subject
+   and session (`anat/` or `ct/`: CT, else T1w, T2w, PD). **Import CT/MR file...** loads the CT / MR from a file
+   (contrast from the BIDS name or the `.json` sidecar). **Patient**: the **name and patient ID** (from the DICOM tags or
    the subject hierarchy; the BIDS subject of an imported file as the ID), **age and sex** (from the tags); all can be
    typed. **Other sequences**: more volumes of the patient lying on the CT / MR (FLAIR, T2, ...), normalized with the
    same transform in step 3 for the fusion of the review.
@@ -394,7 +410,8 @@ step; a step opens at its top. Without a CT / MR, Next goes from the data straig
      sqrt(1 + 1/n) (default); negative means below the normals (hypometabolism / hypoperfusion).
    - Voxel scores: the patient on the database grid (SUVR to the database's reference mask for an SUVR database),
      smoothed with the database's FWHM like the normals, scored inside the MNI brain mask where the normal mean is
-     above 5 % of its maximum, with an SD floor of 20 % of the median SD there. Regional scores: the unsmoothed
+     above 5 % of its maximum ("Score only where the normal mean > 5 %", on by default; off: the brain mask alone,
+     compares again), with an SD floor of 20 % of the median SD there. Regional scores: the unsmoothed
      patient against the normals' regional statistics: the database's own (`stats/regions.json`) when the regions
      are the database's (locked); for other regions of a user defined database computed from its subjects on the fly
      and cached in `<database>/cache/`; otherwise approximated from the mean / SD maps (the mean voxel SD is larger
@@ -474,6 +491,9 @@ NeuroPETDatabaseManager; so scenes and scripts that use them) are unchanged too;
 ```
 NeuroPET/
   DynamicNeuroPET.py               Dynamic Neuro Receptor PET workflow (visible, Nuclear Medicine)
+  NeuroWorkflowLib/                the workflow both Neuro modules are built on:
+    base.py                        NeuroWorkflowLogic / NeuroWorkflowWidget (normalization, regions, steps,
+                                   toolbar, Data / Normalization / Regions pages; DynamicNeuroPET.py re-exports it)
   StaticNeuroPET.py                Static Neuro PET/SPECT workflow (visible, Nuclear Medicine)
   StaticNeuroPETLib/                its parts, one file per step / topic (mixins of its logic and widget):
     constants.py, helpers.py         steps, settings keys, attributes, display defaults; screens, step icons

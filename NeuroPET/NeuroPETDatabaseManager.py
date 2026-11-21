@@ -188,6 +188,10 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
         (header referenceStructure: 'Cerebellum Gray Matter' takes 'Cerebellum Gray Matter R' and '... L')."""
         from DynamicNeuroPET import DynamicNeuroPETLogic
         name = str(header.get("referenceStructure") or "").strip()
+        if neuro.isWhiteMatterReference(name):      # of the space, not of the region atlas
+            mask, labelsPath = DynamicNeuroPETLogic().whiteMatterReferenceMask(neuro.atlasFiles(header.get("space")))
+            source = slicer.util.loadLabelVolume(labelsPath, {"show": False})
+            return self._saveReferenceMask(folder, header, source, mask)
         kind = neuro.mergedRegionAtlas(header.get("regionAtlas") or normaldb.DEFAULT_REGION_ATLAS)
         labelsPath, entries = DynamicNeuroPETLogic().regionAtlasPaths(kind)
         values = neuro.referenceRegionValues(entries, name, neuro.referenceGroups(kind))
@@ -615,8 +619,10 @@ class HeaderForm:
         refForm.addRow("Grouping:", self.groupingCombo)
         self.referenceCombo = qt.QComboBox()
         self.referenceCombo.toolTip = ("Region the images are divided by (SUVR): the whole brain, a region of the "
-                                       "segmentation and grouping above (both sides together) or a custom mask file. "
-                                       "Its mask is copied into the database.")
+                                       "segmentation and grouping above (both sides together), the centrum semiovale "
+                                       "(white matter above the lateral ventricles, from the space's white matter "
+                                       "map: for tracers binding in all grey matter, e.g. [11C]UCB-J) or a custom mask "
+                                       "file. Its mask is copied into the database.")
         refForm.addRow("Reference region:", self.referenceCombo)
         self._fillSegmentations()
         self.maskPath = _pathEdit()
@@ -890,7 +896,10 @@ class HeaderForm:
             return []
         try:
             kind = neuro.mergedRegionAtlas(self.regionAtlasKey())
-            return neuro.referenceRegionNames(neuro.regionTable(kind)[0], neuro.referenceGroups(kind))
+            names = neuro.referenceRegionNames(neuro.regionTable(kind)[0], neuro.referenceGroups(kind))
+            if names and "WM" in neuro.atlasFiles(self.spaceId()):     # of the space: the centrum semiovale
+                names.append(neuro.WHITE_MATTER_REFERENCE)
+            return names
         except Exception:       # noqa: BLE001 - shown as a list without atlas regions
             logging.warning("Neuro DB: could not read the regions of the region atlas", exc_info=True)
             return []

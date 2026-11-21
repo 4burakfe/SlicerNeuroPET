@@ -14,8 +14,8 @@ import qt
 import slicer
 
 from DICOMGatedDynamicPETLib import registration as reg
-from DynamicNeuroPET import (DynamicNeuroPETWidget, METHOD_ANATOMY, METHOD_PET, METHOD_PET_TEMPLATE, NEURO_PREFIX,
-                             PET_TEMPLATE_ATTRIBUTE)
+from NeuroWorkflowLib.base import (NeuroWorkflowWidget, METHOD_ANATOMY, METHOD_PET, METHOD_PET_TEMPLATE, NEURO_PREFIX,
+                                   PET_TEMPLATE_ATTRIBUTE)
 from NeuroPETLib import credits, neuro, normaldb, staticneuro as sn
 
 from StaticNeuroPETLib.constants import DATABASE_PARAMETER, NORMALIZATION_ATTRIBUTE, WARNING_STYLE
@@ -70,7 +70,7 @@ class NormalizationPageMixin:
 
     # --- page 3: normalization (the Dynamic Neuro page with the normal database and the PET template) -----
     def _buildNormPage(self):
-        page = DynamicNeuroPETWidget._buildNormPage(self)
+        page = NeuroWorkflowWidget._buildNormPage(self)
         box = qt.QGroupBox("Normal database")
         form = qt.QFormLayout(box)
         self.dbRootPath = ctk.ctkPathLineEdit()
@@ -125,7 +125,7 @@ class NormalizationPageMixin:
             return
         petTemplate = self.method() == METHOD_PET_TEMPLATE
         if not petTemplate:
-            DynamicNeuroPETWidget._updateTemplateChoice(self)
+            NeuroWorkflowWidget._updateTemplateChoice(self)
             return
         self._fillTemplateCombo()          # the database's PET template ('From DB: <name> - PET template')
         self._updateTemplateCredits()
@@ -168,7 +168,7 @@ class NormalizationPageMixin:
         if not hasattr(self, "templateCredits"):
             return
         if self.method() != METHOD_PET_TEMPLATE:
-            DynamicNeuroPETWidget._updateTemplateCredits(self)
+            NeuroWorkflowWidget._updateTemplateCredits(self)
             return
         try:
             header = self._header(self._database()) if hasattr(self, "dbCombo") else None
@@ -180,7 +180,7 @@ class NormalizationPageMixin:
 
     def _template(self):
         if self.method() != METHOD_PET_TEMPLATE:
-            return DynamicNeuroPETWidget._template(self)
+            return NeuroWorkflowWidget._template(self)
         folder = self._database()
         header = self._header(folder)
         path = sn.petTemplatePath(folder, header) if header else None
@@ -192,7 +192,7 @@ class NormalizationPageMixin:
         return template
 
     def _updateNormButtons(self):
-        DynamicNeuroPETWidget._updateNormButtons(self)
+        NeuroWorkflowWidget._updateNormButtons(self)
         if hasattr(self, "dbCombo") and self.method() == METHOD_PET_TEMPLATE:
             folder = self._database()
             header = self._header(folder)
@@ -235,7 +235,7 @@ class NormalizationPageMixin:
 
     def onNormalize(self):
         settings = self.normalizationSettings()
-        DynamicNeuroPETWidget.onNormalize(self)
+        NeuroWorkflowWidget.onNormalize(self)
         if self.normResult is not None:
             self.normResult["settings"] = settings
         self._updateDatabaseInfo()
@@ -249,7 +249,7 @@ class NormalizationPageMixin:
         settings = (self.normResult or {}).get("settings")
         undo = self.normUndo
         method = (self.normResult or {}).get("method")
-        DynamicNeuroPETWidget.onNormHarden(self)
+        NeuroWorkflowWidget.onNormHarden(self)
         volume = self.volume()
         if self.normUndo is not undo and volume is not None:
             if settings:

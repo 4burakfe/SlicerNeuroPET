@@ -14,7 +14,7 @@ import qt
 import slicer
 import vtk
 
-from DynamicNeuroPET import _ijkToRas
+from NeuroWorkflowLib.base import _ijkToRas
 from NeuroPETLib import neuroreview as nr, ssp
 
 from StaticNeuroPETLib.constants import (CLICK_TOLERANCE_PX, MOUSE_PRIORITY, SSP_OUTLINE_ATTRIBUTE,

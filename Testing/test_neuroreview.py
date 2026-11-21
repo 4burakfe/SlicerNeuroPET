@@ -16,6 +16,9 @@ def test_score_mask_and_sd_floor():
     assert nr.scoreMask(mean).tolist() == [False, False, True, True, False]     # above 5 % of the maximum
     brain = np.array([1, 1, 0, 1, 1])
     assert nr.scoreMask(mean, brain).tolist() == [False, False, False, True, False]
+    # without the 5 % mean mask: the brain mask alone (finite mean); without a brain mask, the mean above 0
+    assert nr.scoreMask(mean, brain, None).tolist() == [True, True, False, True, False]
+    assert nr.scoreMask(mean, None, None).tolist() == [False, True, True, True, False]
     with pytest.raises(ValueError):
         nr.scoreMask(mean, np.ones(3))
     sd = np.array([0.0, 1.0, 1.0, 0.01, 2.0], dtype=np.float32)

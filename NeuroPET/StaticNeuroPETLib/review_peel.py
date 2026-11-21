@@ -13,7 +13,7 @@ import slicer
 import vtk
 
 from DICOMGatedDynamicPETLib import colormaps
-from DynamicNeuroPET import _ijkToRas, _vtkMatrix
+from NeuroWorkflowLib.base import _ijkToRas, _vtkMatrix
 from NeuroPETLib import neuroreview as nr, peel
 
 from StaticNeuroPETLib.constants import MOUSE_PRIORITY, PEEL_ATTRIBUTE, PEEL_NODE_PREFIX, SSP_SETUP_DELAY_MS

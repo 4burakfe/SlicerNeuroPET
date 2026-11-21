@@ -14,7 +14,7 @@ import slicer
 
 from DICOMGatedDynamicPETLib import registration as reg
 from DICOMGatedDynamicPETLib.hardendialog import hardenDialog
-from DynamicNeuroPET import _button, _ijkToRas, _percentiles
+from NeuroWorkflowLib.base import _button, _ijkToRas, _percentiles
 
 from StaticNeuroPETLib.constants import REG_LINEAR
 

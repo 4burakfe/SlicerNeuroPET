@@ -6,19 +6,21 @@ Receptor PET module (same normalization and regions) and the Neuro PET normal da
 
     1. Data                 the static PET (PET4D DICOM plugin) or SPECT (DICOM SPECT reconstruction), or an image
                             file (BIDS PET: sub-<id>_ses-<session>_pet.nii.gz with its .json sidecar and the
-                            participants.tsv), the patient's CT / MR, the age and sex (read from the tags, editable)
+                            participants.tsv; a file, or a subject / session folder with its CT / MR), the patient's
+                            CT / MR (DICOM or a file), the age and sex (read from the tags, editable)
     2. CT/MR registration   optional: the image registered to the CT / MR (iterative rigid only) and hardened
     3. Normalization        the normal database (those of the image's modality, nuclide and tracer first; its
                             normalization settings are the defaults, others warn) and the normalization to a template
-                            space (the database's; default MNI ICBM 152 2009c): the PET/SPECT to an MR template, the CT/MR to the MR template with the
-                            same transform applied to the image, or the PET/SPECT to the database's master mean map
+                            space (the database's; default MNI ICBM 152 2009c): the PET/SPECT to an MR template,
+                            the CT/MR to the MR template with the same transform applied to the image, or the
+                            PET/SPECT to the database's master mean map
     4. Regions              a segmentation of the space in a grouping (CerebrA, CerebrA PET, ...): with a database
                             its region settings (segmentation and grouping, growth, white matter,
                             reference region and its mask) are used, locked unless unlocked
     5. Review               the comparison with the database (4 x 4 layout: PET with region outlines, voxel z / t
-                            map, 3D-SSP views, region table with SUVmean and regional scores; fusion with the CT / MR / template); adding
-                            the patient to a user defined database (SUV and SUVR maps on the database grid, a row
-                            in subjects.csv)
+                            map, 3D-SSP views, region table with SUVmean and regional scores; fusion with the CT /
+                            MR / template); adding the patient to a user defined database (SUV and SUVR maps on the
+                            database grid, a row in subjects.csv)
 """
 
 import os
@@ -41,9 +43,9 @@ import slicer
 
 from slicer.ScriptedLoadableModule import ScriptedLoadableModule, ScriptedLoadableModuleTest
 from DICOMGatedDynamicPETLib import registration as reg
-from DynamicNeuroPET import (DynamicNeuroPETLogic, DynamicNeuroPETWidget, METHOD_PET, NEURO_PREFIX, REFERENCE_SUFFIX,
-                             REG_PREFIX, STATE_DONE, STATE_READY, STATE_WAITING, STEP_DATA, STEP_NORM, STEP_REG,
-                             STEP_REGIONS, _ijkToRas)
+from NeuroWorkflowLib.base import (NeuroWorkflowLogic, NeuroWorkflowWidget, METHOD_PET, NEURO_PREFIX, REFERENCE_SUFFIX,
+                                   REG_PREFIX, STATE_DONE, STATE_READY, STATE_WAITING, STEP_DATA, STEP_NORM, STEP_REG,
+                                   STEP_REGIONS, _ijkToRas)
 from NeuroPETLib import normaldb, neuroreview as nr, staticneuro as sn, ssp
 
 from StaticNeuroPETLib.constants import (ICON_PATH, METHODS, NORM_HARDEN_ACTIONS, NORM_HARDEN_GRIDS, REGIONS_COLUMNS,
@@ -86,7 +88,8 @@ class StaticNeuroPET(ScriptedLoadableModule):
             "152 2009c space (PET/SPECT to the T1 template, CT/MR to the MR template, or PET/SPECT to the mean map of "
             "a normal database; the normal database is picked here and gives its normalization settings), <b>4. "
             "Regions</b> (the CerebrA regions as in the database) and <b>5. Review</b> (and adding the patient to a "
-            "user defined database). The atlases are not shipped: pick their folder in step 3.")
+            "user defined database). The extension brings the MNI 2009c space and the CerebrA segmentations; more "
+            "go in your atlas folder (~/NeuroPET/Atlas, 'Open atlas folder' in step 3).")
         parent.acknowledgementText = (
             "Part of Mergen (Neuro PET/SPECT Analysis), built on the PET4D (DICOM Gated / Dynamic PET) extension. "
             "MNI ICBM 152 nonlinear symmetric 2009c template: Fonov "
@@ -96,7 +99,7 @@ class StaticNeuroPET(ScriptedLoadableModule):
 # ---------------------------------------------------------------------------
 # Logic
 # ---------------------------------------------------------------------------
-class StaticNeuroPETLogic(ImageLogicMixin, DatabaseLogicMixin, ReviewLogicMixin, BatchLogicMixin, DynamicNeuroPETLogic):
+class StaticNeuroPETLogic(ImageLogicMixin, DatabaseLogicMixin, ReviewLogicMixin, BatchLogicMixin, NeuroWorkflowLogic):
     """The Neuro logic on one static volume (the "series" of the Dynamic Neuro steps is the volume itself):
 
         logic = StaticNeuroPETLogic()
@@ -124,7 +127,7 @@ class StaticNeuroPETWidget(ToolbarMixin,
                             ReviewPeelMixin,
                             ReviewLayoutMixin,
                             ReviewMouseMixin,
-                            DynamicNeuroPETWidget):
+                            NeuroWorkflowWidget):
     """The Dynamic Neuro workflow on a static PET / SPECT: own Data, CT/MR registration, Regions (normal
     database settings) and Review pages; the Normalization page of the Dynamic Neuro module with the normal database
     and the PET template method."""
@@ -151,7 +154,7 @@ class StaticNeuroPETWidget(ToolbarMixin,
         self.databaseRows = []          # [(folder, header, rank, problems)]
         self._databaseKey = None
         self._databaseChosen = False
-        DynamicNeuroPETWidget.setup(self)
+        NeuroWorkflowWidget.setup(self)
         self.pages[STEP_REG] = self._buildRegPage()
         self.pages[STEP_REVIEW] = self._buildReviewPage()
         self.refresh()
@@ -189,18 +192,18 @@ class StaticNeuroPETWidget(ToolbarMixin,
                 self._enterReviewViews()
                 qt.QTimer.singleShot(200, self._autoCompare)
             return
-        DynamicNeuroPETWidget._callStep(self, key, method)
+        NeuroWorkflowWidget._callStep(self, key, method)
 
     def pendingHarden(self, key):
         if key == STEP_REG:
             return self.regResult is not None
-        return DynamicNeuroPETWidget.pendingHarden(self, key)
+        return NeuroWorkflowWidget.pendingHarden(self, key)
 
     def _hardenStep(self, key):
         if key == STEP_REG:
             self.onRegHarden()
         else:
-            DynamicNeuroPETWidget._hardenStep(self, key)
+            NeuroWorkflowWidget._hardenStep(self, key)
 
     def stepStates(self):
         volume, anatomy = self.volume(), self.anatomy()
@@ -217,7 +220,7 @@ class StaticNeuroPETWidget(ToolbarMixin,
         return states
 
     def refresh(self):
-        DynamicNeuroPETWidget.refresh(self)
+        NeuroWorkflowWidget.refresh(self)
         self._updateRegButtons()
         self._updateReviewPage()
         self._updatePatientLabel()
@@ -229,10 +232,10 @@ class StaticNeuroPETWidget(ToolbarMixin,
             self._exitRegionsViews()
         if getattr(self, "current", None) == STEP_REVIEW:
             self._exitReviewViews()
-        DynamicNeuroPETWidget.cleanup(self)
+        NeuroWorkflowWidget.cleanup(self)
 
     def onSceneClose(self, caller, event):
-        DynamicNeuroPETWidget.onSceneClose(self, caller, event)
+        NeuroWorkflowWidget.onSceneClose(self, caller, event)
         self._closeRegSession()
         # the views' interactors and the slice and camera nodes of the layout outlive the scene: the review's
         # observers are taken off them before they are forgotten below (else every closed scene left one more
@@ -293,13 +296,16 @@ class StaticNeuroPETWidget(ToolbarMixin,
             self.regLabel.text = "Not registered."
 
     def onReload(self):
-        """Developer reload: the StaticNeuroPETLib files reloaded first (Slicer reloads only this file)."""
+        """Developer reload: the NeuroWorkflowLib and StaticNeuroPETLib files reloaded first (Slicer reloads only this
+        file)."""
         import importlib
+        import NeuroWorkflowLib
         import StaticNeuroPETLib
+        NeuroWorkflowLib.reloadModules()
         importlib.reload(StaticNeuroPETLib)
         for name in StaticNeuroPETLib.MODULES:
             importlib.reload(importlib.import_module("StaticNeuroPETLib." + name))
-        DynamicNeuroPETWidget.onReload(self)
+        NeuroWorkflowWidget.onReload(self)
 
 
 def _testFolder(prefix="tmp"):

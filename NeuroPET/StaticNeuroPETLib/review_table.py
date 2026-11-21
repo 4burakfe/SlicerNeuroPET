@@ -12,7 +12,7 @@ import qt
 import slicer
 import vtk
 
-from DynamicNeuroPET import _ijkToRas
+from NeuroWorkflowLib.base import _ijkToRas
 from NeuroPETLib import normaldb, neuroreview as nr
 
 from StaticNeuroPETLib.constants import REVIEW_FLASH_MS

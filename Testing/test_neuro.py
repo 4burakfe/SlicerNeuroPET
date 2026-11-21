@@ -557,3 +557,32 @@ def test_bundled_library():
     assert "Pons R" in names and "Brainstem (except pons) L" in names and "Optic Chiasm R" not in names
     assert neuro.regionAtlasTitle("CerebrA_PET:compatible") == "CerebrA PET, Broad (Compatible)"
 
+
+
+def test_white_matter_reference():
+    """The centrum semiovale: white matter (probability >= 0.9) above the lateral ventricles, in no atlas region."""
+    shape = (20, 8, 8)                                  # k (superior), j, i
+    wm = np.zeros(shape, dtype=np.float32)
+    wm[:, 2:6, 2:6] = 100.0                             # stored 0-100
+    wm[:, 2, 2] = 80.0                                  # 0.8: not the core
+    labels = np.zeros(shape, dtype=np.int32)
+    labels[5:8, 3:5, 3:5] = 41                          # lateral ventricle up to k = 7
+    labels[15:, 2:6, 2:4] = 7                           # cortex
+    entries = [(41, "Lateral Ventricle R", (0, 0, 0)), (5, "Inferior Lateral Ventricle R", (0, 0, 0)),
+               (7, "Precuneus R", (0, 0, 0))]
+    assert neuro.lateralVentricleValues(entries) == [41]
+    ijkToRas = np.eye(4)
+    ijkToRas[2, 3] = -10.0
+    mask = neuro.whiteMatterReferenceMask(wm, labels, [41], ijkToRas)
+    rows = np.where(mask.any(axis=(1, 2)))[0]
+    assert rows.min() == 8 and rows.max() == 19          # above the ventricles only
+    assert not mask[:, 2, 2].any() and not (mask & (labels > 0)).any()
+    brain = np.ones(shape, dtype=np.uint8)
+    brain[12:] = 0
+    assert np.where(neuro.whiteMatterReferenceMask(wm, labels, [41], ijkToRas, brain).any(axis=(1, 2)))[0].max() == 11
+    flipped = np.diag([1.0, 1.0, -1.0, 1.0])            # superior is k down: the voxels under the ventricles
+    rows = np.where(neuro.whiteMatterReferenceMask(wm, labels, [41], flipped).any(axis=(1, 2)))[0]
+    assert rows.max() == 4
+    with pytest.raises(ValueError):
+        neuro.whiteMatterReferenceMask(wm, labels, [99], ijkToRas)
+    assert neuro.isWhiteMatterReference(" centrum semiovale (white matter) ")

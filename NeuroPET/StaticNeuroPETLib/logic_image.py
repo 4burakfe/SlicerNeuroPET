@@ -13,8 +13,8 @@ import os
 import slicer
 
 from DICOMGatedDynamicPETLib import registration as reg, resampling
-from DynamicNeuroPET import (ATLAS_FILE_ATTRIBUTE, METHOD_PET, NEURO_PREFIX, NORMALIZED_SUFFIX, REG_PREFIX,
-                             _ijkToRas, _percentiles, _vtkMatrix)
+from NeuroWorkflowLib.base import (ATLAS_FILE_ATTRIBUTE, METHOD_PET, NEURO_PREFIX, NORMALIZED_SUFFIX, REG_PREFIX,
+                                   _ijkToRas, _percentiles, _vtkMatrix)
 from NeuroPETLib import staticneuro as sn
 
 from StaticNeuroPETLib.constants import AGE_ATTRIBUTE, ID_ATTRIBUTE, NAME_ATTRIBUTE, REGISTERED_SUFFIX, SEX_ATTRIBUTE

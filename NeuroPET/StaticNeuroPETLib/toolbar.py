@@ -9,7 +9,7 @@ import qt
 import slicer
 
 from DICOMGatedDynamicPETLib import colormaps
-from DynamicNeuroPET import DynamicNeuroPETWidget
+from NeuroWorkflowLib.base import NeuroWorkflowWidget
 from NeuroPETLib import neuroreview as nr, peel
 
 from StaticNeuroPETLib.constants import PEEL_DEPTHS, REVIEW_SCORE_WINDOWS, STEP_ICON_SIZE, STEP_REVIEW
@@ -21,7 +21,7 @@ class ToolbarMixin:
 
     # --- workflow toolbar: the patient right of the module's name, the review tools ----------------------------
     def _stepButton(self, index, key, title, explanation):
-        button = DynamicNeuroPETWidget._stepButton(self, index, key, title, explanation)
+        button = NeuroWorkflowWidget._stepButton(self, index, key, title, explanation)
         button.setIconSize(qt.QSize(2 * STEP_ICON_SIZE, STEP_ICON_SIZE))
         return button
 
@@ -29,7 +29,7 @@ class ToolbarMixin:
         return _stepIcon(key, state, number)
 
     def _buildToolbar(self):
-        toolbar = DynamicNeuroPETWidget._buildToolbar(self)
+        toolbar = NeuroWorkflowWidget._buildToolbar(self)
         if toolbar is None:
             return None
         toolbar.setIconSize(qt.QSize(2 * STEP_ICON_SIZE, STEP_ICON_SIZE))

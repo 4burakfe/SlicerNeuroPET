@@ -13,7 +13,7 @@ import qt
 import slicer
 
 from DICOMGatedDynamicPETLib import colormaps, registration as reg
-from DynamicNeuroPET import ATLAS_FILE_ATTRIBUTE, NEURO_PREFIX, _button, _vtkMatrix
+from NeuroWorkflowLib.base import ATLAS_FILE_ATTRIBUTE, NEURO_PREFIX, _button, _vtkMatrix
 from NeuroPETLib import credits, neuro, normaldb, neuroreview as nr, peel, staticneuro as sn
 
 from StaticNeuroPETLib.constants import (FUSION_TEMPLATES, NORMALIZATION_ATTRIBUTE, REVIEW_FUSION_OPACITY,
@@ -25,6 +25,8 @@ from StaticNeuroPETLib.helpers import _sameRegion, _screenCount
 
 class ReviewPageMixin:
     """The review page methods of StaticNeuroPETWidget."""
+
+    REVIEW_MEAN_MASK = True     # default of "Score only where the normal mean > 5 %" (Dynamic Compare: off)
 
     # --- page 5: review (placeholder) and adding the patient to a database ------------------------------
     def _buildReviewPage(self):
@@ -89,6 +91,15 @@ class ReviewPageMixin:
                                    "small number of normals n. Negative: the patient below the normals "
                                    "(hypometabolism / hypoperfusion). Shown in the score row and the region table.")
         form.addRow("Score:", self.scoreCombo)
+        percent = f"{nr.MASK_FRACTION * 100:g}"
+        self.meanMaskCheck = qt.QCheckBox(f"Score only where the normal mean > {percent} % of its maximum")
+        self.meanMaskCheck.checked = self.REVIEW_MEAN_MASK
+        self.meanMaskCheck.toolTip = (
+            f"On: the voxels scored are those in the MNI brain mask where the database mean is above {percent} % of "
+            "its maximum (the ventricles and the CSF, near 0 in the normals, left out). Off: the brain mask alone "
+            "(for maps whose values are low in much of the brain, e.g. a striatal tracer's BPnd in the cortex). "
+            "Changing it compares again.")
+        form.addRow(self.meanMaskCheck)
         self.compareButton = _button("Compare with the database")
         form.addRow(self.compareButton)
         self.compareLabel = qt.QLabel()
@@ -277,6 +288,7 @@ class ReviewPageMixin:
         layout.addLayout(settingsRow)
 
         self.compareButton.connect("clicked()", self.onCompare)
+        self.meanMaskCheck.connect("toggled(bool)", lambda on: self._onMeanMaskChanged())
         self.groupCombo.connect("activated(int)", lambda i: setattr(self, "_groupChosen", True))
         self.scoreCombo.connect("currentIndexChanged(int)", lambda i: self._showScores())
         self.petColorCombo.connect("currentIndexChanged(int)", lambda i: self._applyPetDisplay())
@@ -329,7 +341,7 @@ class ReviewPageMixin:
                 "scoreMaximum": self.scoreMaximumSpin, "scoreSide": self.scoreSideCombo,
                 "threshold": self.thresholdSpin,
                 "scoreStyle": self.scoreStyleCombo, "scoreMask": self.scoreMaskCombo, "greyMatter": self.gmSpin,
-                "uptake": self.uptakeSpin, "hideBelow": self.hideBelowSpin,
+                "uptake": self.uptakeSpin, "hideBelow": self.hideBelowSpin, "meanMask": self.meanMaskCheck,
                 "scoreBackground": self.scoreBackgroundCombo, "outlines": self.outlineCheck,
                 "legends": self.legendCheck, "table": self.tableDefaultCheck, "sspMap": self.sspMapCombo, "sspSource": self.sspSourceCombo,
                 "sspColors": self.sspColorCombo, "sspMaximum": self.sspMaximumSpin,
@@ -529,7 +541,8 @@ class ReviewPageMixin:
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
             result = self.logic.reviewData(volume, segmentation, folder if header is not None else None, header,
-                                           groupKey, self.atlas, referenceId, self._locked(), progress)
+                                           groupKey, self.atlas, referenceId, self._locked(), progress,
+                                           meanMask=bool(self.meanMaskCheck.checked))
             if result is not None:
                 try:
                     result["ssp"] = self.logic.reviewSsp(result, folder, header, groupKey, self._locked(), progress)
@@ -574,6 +587,14 @@ class ReviewPageMixin:
         self.compareLabel.text = " ".join(lines)
         self.refresh()
 
+    def _onMeanMaskChanged(self):
+        """The 5 % mean mask changes the voxels scored: compare again when there is a comparison (with a database)."""
+        result = self.reviewResult
+        if (result is not None and result.get("header") is not None
+                and result.get("meanMask", True) != bool(self.meanMaskCheck.checked)
+                and getattr(self, "current", None) == STEP_REVIEW and self.compareButton.enabled):
+            self.onCompare()
+
     def _autoCompare(self):
         """Compare on entering the review when there is no comparison of this image, regions and database yet (once
         per image, regions and database: not again after a failure or a stop)."""
@@ -583,11 +604,13 @@ class ReviewPageMixin:
         folder = self._database()
         header = self._header(folder)
         result = self.reviewResult
+        meanMask = bool(self.meanMaskCheck.checked)
         if (result is not None and result.get("volume") is volume and result.get("header") == header
-                and result.get("segmentation") is segmentation):
+                and result.get("segmentation") is segmentation
+                and (header is None or result.get("meanMask", True) == meanMask)):
             return
         key = (volume.GetID() if volume else "", segmentation.GetID() if segmentation else "", folder,
-               json.dumps(header, sort_keys=True, default=str))
+               json.dumps(header, sort_keys=True, default=str), meanMask)
         if self._autoCompared == key:
             return
         self._autoCompared = key

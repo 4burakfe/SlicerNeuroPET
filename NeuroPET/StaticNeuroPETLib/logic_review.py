@@ -13,7 +13,7 @@ import slicer
 import vtk
 
 from DICOMGatedDynamicPETLib import resampling
-from DynamicNeuroPET import DynamicNeuroPETLogic, _ijkToRas, _vtkMatrix
+from NeuroWorkflowLib.base import NeuroWorkflowLogic, _ijkToRas, _vtkMatrix
 from NeuroPETLib import neuro, normaldb, neuroreview as nr, staticneuro as sn, ssp
 
 from StaticNeuroPETLib.constants import SSP_MAX_EDGE_MM, SSP_TARGET_POINTS
@@ -72,7 +72,7 @@ class ReviewLogicMixin:
         """Remove the segments the review leaves out (the optic chiasm). Returns their names."""
         removed = []
         seg = segmentation.GetSegmentation()
-        for segmentId in DynamicNeuroPETLogic.segmentIds(segmentation):
+        for segmentId in NeuroWorkflowLogic.segmentIds(segmentation):
             name = seg.GetSegment(segmentId).GetName()
             if nr.isDroppedSegment(name):
                 seg.RemoveSegment(segmentId)
@@ -80,15 +80,16 @@ class ReviewLogicMixin:
         return removed
 
     def reviewData(self, volume, segmentation, folder=None, header=None, groupKey=normaldb.MASTER, atlas=None,
-                   referenceSegmentId=None, locked=True, progress=None):
+                   referenceSegmentId=None, locked=True, progress=None, meanMask=True):
         """The patient (a normalized volume and its regions) compared with a normal database:
         {"grid": the grid node (the group's mean map; without a database the volume), "z": voxel z map (negative
         below the mean; t = z / tFactor(n)) or None, "n", "names", "suv" {region: SUV mean}, "values" {region:
         value of the database's map type}, "reference" {region: [mean, SD, n]}, "source", "ratio" (map type SUVR /
-        Ratio), "referenceMean", "fwhm", "notes"}. None when stopped."""
+        Ratio), "referenceMean", "fwhm", "notes", "meanMask"}. meanMask: the voxels scored only where the database
+        mean is above MASK_FRACTION (5 %) of its maximum (else the brain mask alone). None when stopped."""
         notes = []
         result = {"z": None, "n": None, "reference": {}, "source": "", "ratio": False, "referenceMean": None,
-                  "fwhm": 0.0, "notes": notes}
+                  "fwhm": 0.0, "notes": notes, "meanMask": bool(meanMask)}
         groups = ((header or {}).get("statistics") or {}).get("groups") or {}
         group = groups.get(groupKey) if header is not None else None
         if header is not None and not group:
@@ -158,7 +159,7 @@ class ReviewLogicMixin:
                 brain = brainArray > 0
             else:
                 notes.append("The MNI brain mask is not on the database grid: the score mask is the mean map's.")
-        mask = nr.scoreMask(mean, brain)
+        mask = nr.scoreMask(mean, brain, nr.MASK_FRACTION if meanMask else None)
         smoothed = normaldb.smoothMap(values, fwhm, spacing)
         union = nr.unionMask(masks, mean.shape)
         result.update(smoothed=smoothed, union=union, hull=self.brainHull(union, atlas, grid),
