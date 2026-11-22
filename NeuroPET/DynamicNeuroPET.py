@@ -26,6 +26,11 @@ A step-by-step workflow for dynamic receptor PET of the brain, built on the othe
                             With a database: locked to its region settings (Unlock), 3x2 regions views.
     6. Modeling             the Dynamic PET Modeling panel, ready with the normalized series, the regions, SRTM2 and
                             the reference region of step 5; with a database, its kinetic model and settings
+    7. Review/Compare              the patient's parametric maps (BPnd, R1, k2 of SRTM2 by default) made with the Modeling
+                            step's settings in the template's brain (or the Modeling step's own maps of the same
+                            settings, asked first), one map picked; the Review step of the Static Neuro module on it
+                            (slices, region table, 3D-SSP, cut, unfolded brain layouts; Slices by default), the
+                            regional values the model fitted to the regions' curves (default) or the voxel map means
 
 Steps 2, 3 and 6 show the panels of those modules inside this one; the series each step makes (a motion corrected or
 registered series saved separately) becomes the series of the next step. The template spaces and segmentations come
@@ -72,11 +77,30 @@ from NeuroWorkflowLib.base import (VTKObservationMixin, requireBaseExtension, dy
                                    _ijkToRas, _percentiles, defaultReferenceName, NeuroWorkflowLogic, _badge,
                                    _badgePixmap, _button, _growIntoCombo, NeuroWorkflowWidget)  # noqa: E402,F401
 from NeuroWorkflowLib import scenestate  # noqa: E402
-from NeuroWorkflowLib.database import (DatabaseFolderLogicMixin, NormalizationDatabaseMixin,  # noqa: E402
-                                       RegionsDatabaseMixin, NORMALIZATION_ATTRIBUTE, seriesInfo)
+from NeuroWorkflowLib.database import (NormalizationDatabaseMixin, RegionsDatabaseMixin,  # noqa: E402
+                                       NORMALIZATION_ATTRIBUTE, registerRegionsLayout, seriesInfo)
+from NeuroWorkflowLib.compare import ComparePageMixin, COMPARE_MAP_ROLE  # noqa: E402
+from NeuroPETLib import neuroreview as nr  # noqa: E402
+# the review of the Static Neuro module (its mixins) on the parametric maps: the Review/Compare step
+from StaticNeuroPETLib.constants import STEP_REVIEW  # noqa: E402
+from StaticNeuroPETLib.logic_database import DatabaseLogicMixin  # noqa: E402
+from StaticNeuroPETLib.logic_review import ReviewLogicMixin  # noqa: E402
+from StaticNeuroPETLib.toolbar import ToolbarMixin  # noqa: E402
+from StaticNeuroPETLib.review_page import ReviewPageMixin  # noqa: E402
+from StaticNeuroPETLib.review_colors import ReviewColorsMixin  # noqa: E402
+from StaticNeuroPETLib.review_table import ReviewTableMixin  # noqa: E402
+from StaticNeuroPETLib.review_ssp import ReviewSspMixin  # noqa: E402
+from StaticNeuroPETLib.review_cut import ReviewCutMixin  # noqa: E402
+from StaticNeuroPETLib.review_peel import ReviewPeelMixin  # noqa: E402
+from StaticNeuroPETLib.review_layout import ReviewLayoutMixin, registerReviewLayouts  # noqa: E402
+from StaticNeuroPETLib.review_mouse import ReviewMouseMixin  # noqa: E402
 
 # the normalization methods: the summed PET to a PET template of a dynamic database too (its subjects' summed images)
 DYNAMIC_METHODS = METHODS + ((METHOD_PET_TEMPLATE, "Register the summed PET to the database's PET template"),)
+# step 7: the parametric maps compared (the Static Neuro Review step's key: its review mixins check it)
+STEP_COMPARE = STEP_REVIEW
+DYNAMIC_STEPS = STEPS + ((STEP_COMPARE, None, "Review/Compare", "The patient's parametric maps (BPnd, R1, ...) and their "
+                                                       "regional values"),)
 
 
 class DynamicNeuroPET(ScriptedLoadableModule):
@@ -91,8 +115,9 @@ class DynamicNeuroPET(ScriptedLoadableModule):
             "Workflow for dynamic receptor PET of the brain: <b>1. Data</b> (dynamic series from DICOM or a BIDS "
             "NIfTI, the CT/MR, patient, age and sex, optional smoothing), <b>2. Motion correction</b>, <b>3. CT/MR "
             "registration</b> (rigid by default, affine selectable), <b>4. Normalization</b> to a template space (default MNI ICBM 152 2009c), "
-            "<b>5. Regions</b> (a segmentation of the space, default CerebrA PET) and <b>6. Modeling</b> (SRTM2 with the "
-            "cerebellar grey matter as the reference by default). Steps 2, 3 and 6 show the panels of the PET4D "
+            "<b>5. Regions</b> (a segmentation of the space, default CerebrA PET), <b>6. Modeling</b> (SRTM2 with the "
+            "cerebellar grey matter as the reference by default) and <b>7. Review/Compare</b> (the parametric maps in the "
+            "review layouts with their regional values). Steps 2, 3 and 6 show the panels of the PET4D "
             "modules. The extension brings the MNI 2009c space and the CerebrA segmentations; more spaces and "
             "segmentations go in your atlas folder (~/NeuroPET/Atlas, 'Open atlas folder' in step 4). A dynamic "
             "normal database (Neuro PET Database Manager) can be picked in step 4: its normalization, region and "
@@ -109,11 +134,13 @@ class DynamicNeuroPET(ScriptedLoadableModule):
                                     DynamicNeuroPETWidget.LAYOUT_STEPS)
 
 
-class DynamicNeuroPETLogic(DatabaseFolderLogicMixin, NeuroWorkflowLogic):
+class DynamicNeuroPETLogic(ReviewLogicMixin, DatabaseLogicMixin, NeuroWorkflowLogic):
     """The workflow's logic (NeuroWorkflowLib.base.NeuroWorkflowLogic): normalization and regions; usable without the
-    widget (see there). The dynamic normal databases of the database folder (NeuroWorkflowLib.database)."""
+    widget (see there). The dynamic normal databases of the database folder (NeuroWorkflowLib.database); the
+    comparison of a map (the Static Neuro review's logic: StaticNeuroPETLib.logic_review / logic_database)."""
 
     DATABASE_MODE = normaldb.DYNAMIC
+    REFERENCE_COLOR = (0.6, 0.6, 0.6)       # the reference region has no regional value of its own: grey
 
     @staticmethod
     def seriesInfo(sequence):
@@ -121,17 +148,32 @@ class DynamicNeuroPETLogic(DatabaseFolderLogicMixin, NeuroWorkflowLogic):
         return seriesInfo(sequence)
 
 
-class DynamicNeuroPETWidget(NormalizationDatabaseMixin, RegionsDatabaseMixin, NeuroWorkflowWidget):
+class DynamicNeuroPETWidget(ComparePageMixin,
+                            ToolbarMixin,
+                            NormalizationDatabaseMixin,
+                            RegionsDatabaseMixin,
+                            ReviewPageMixin,
+                            ReviewColorsMixin,
+                            ReviewTableMixin,
+                            ReviewSspMixin,
+                            ReviewCutMixin,
+                            ReviewPeelMixin,
+                            ReviewLayoutMixin,
+                            ReviewMouseMixin,
+                            NeuroWorkflowWidget):
     """The workflow's widget (NeuroWorkflowLib.base.NeuroWorkflowWidget) with the Dynamic Neuro steps; the dynamic
     normal database picked on the Normalization page ('' for none: never blocking), its normalization settings the
     page's default, the Regions page locked to its region settings, the regions step views
-    (NeuroWorkflowLib.database)."""
+    (NeuroWorkflowLib.database); the Review/Compare step: the Static Neuro review on the parametric maps
+    (NeuroWorkflowLib.compare, StaticNeuroPETLib.review_*)."""
 
     MODULE_NAME = "DynamicNeuroPET"
+    STEPS = DYNAMIC_STEPS
     LOGIC_CLASS = DynamicNeuroPETLogic
     DATABASE_MODE = normaldb.DYNAMIC
     NORM_METHODS = DYNAMIC_METHODS
-    COMPARED_IN = "the Compare step"
+    COMPARED_IN = "the Review/Compare step"
+    STEP_NEEDS = dict(NeuroWorkflowWidget.STEP_NEEDS, **{STEP_COMPARE: "Load the regions first (Regions step)."})
 
     def setup(self):
         self.databaseRows = []          # [(folder, header, rank, problems)] of the dynamic databases
@@ -139,6 +181,61 @@ class DynamicNeuroPETWidget(NormalizationDatabaseMixin, RegionsDatabaseMixin, Ne
         self._databaseChosen = False
         self._modelingPreset = None     # (database folder, series, regions) whose kinetics Modeling was set to
         NeuroWorkflowWidget.setup(self)
+        self.pages[STEP_COMPARE] = self._buildComparePage()
+        self.refresh()
+
+    # the workflow toolbar of the base (its step icons) with the review's tools (shown on the Review/Compare step)
+    def _stepButton(self, index, key, title, explanation):
+        return NeuroWorkflowWidget._stepButton(self, index, key, title, explanation)
+
+    def _stepIcon(self, key, state, number):
+        return NeuroWorkflowWidget._stepIcon(self, key, state, number)
+
+    def _buildToolbar(self):
+        toolbar = NeuroWorkflowWidget._buildToolbar(self)
+        if toolbar is not None:
+            self._addReviewTools(toolbar)
+        return toolbar
+
+    def stepStates(self):
+        states = NeuroWorkflowWidget.stepStates(self)
+        sequence = self.sequence()
+        normalized = sequence is not None and bool(sequence.GetAttribute(NEURO_PREFIX + "Template"))
+        states[STEP_COMPARE] = (STATE_READY if normalized and self.node("Segmentation") is not None
+                                else STATE_WAITING)
+        return states
+
+    def refresh(self):
+        NeuroWorkflowWidget.refresh(self)
+        if not hasattr(self, "kineticsLabel"):
+            return
+        self._updateCompareBox()
+        self._updateReviewPage()
+        self._updateReviewTools()
+
+    # --- the workflow saved with the scene: the review layouts too ------------------------------------
+    LAYOUT_STEPS = {**NeuroWorkflowWidget.LAYOUT_STEPS, **{layoutId: STEP_COMPARE for layoutId in nr.LAYOUT_IDS}}
+
+    @staticmethod
+    def registerLayouts():
+        registerRegionsLayout()
+        registerReviewLayouts()
+
+    def _adoptSceneNodes(self):
+        """The comparison's map, score map and region table of the saved scene (Compare writes into them again)."""
+        for attribute, role in (("scoreNode", "ReviewScore"), ("reviewTable", "ReviewTable")):
+            node = self.node(role)
+            if node is not None and slicer.mrmlScene.IsNodePresent(node):
+                setattr(self, attribute, node)
+        try:
+            self._adoptCompareMap()
+        except Exception:
+            logging.exception("Neuro: could not take back the compared map")
+
+    def _layoutOwned(self, layoutId):
+        if layoutId in nr.LAYOUT_IDS:
+            return self.current == STEP_COMPARE
+        return NeuroWorkflowWidget._layoutOwned(self, layoutId)
 
     def volume(self):
         """The series' summed image (normalized with it): the image the databases are matched with and the regions
@@ -155,6 +252,13 @@ class DynamicNeuroPETWidget(NormalizationDatabaseMixin, RegionsDatabaseMixin, Ne
                 self._exitRegionsViews()
             elif method == "enter":
                 self._enterRegionsViews()
+        if key == STEP_COMPARE:
+            if method == "exit":
+                self._exitReviewViews()
+            elif method == "enter" and self.node("Segmentation") is not None:
+                self._enterReviewViews()
+                qt.QTimer.singleShot(200, self._autoCompare)
+            return
         NeuroWorkflowWidget._callStep(self, key, method)
 
     def _prepareModeling(self, widget):
@@ -241,19 +345,29 @@ class DynamicNeuroPETWidget(NormalizationDatabaseMixin, RegionsDatabaseMixin, Ne
     def cleanup(self):
         if getattr(self, "current", None) == STEP_REGIONS:
             self._exitRegionsViews()
+        if getattr(self, "current", None) == STEP_COMPARE:
+            self._exitReviewViews()
         NeuroWorkflowWidget.cleanup(self)
 
     def onSceneClose(self, caller, event):
         NeuroWorkflowWidget.onSceneClose(self, caller, event)
+        self._resetReviewState()
+        self._resetCompareState()
         self._regionsPreviousLayout = None
         self._regionsHelpers = None
         self._databaseKey = None
         self._modelingPreset = None
 
     def onReload(self):
-        """Developer reload: the NeuroWorkflowLib files reloaded first (Slicer reloads only this file)."""
+        """Developer reload: the NeuroWorkflowLib and StaticNeuroPETLib files reloaded first (Slicer reloads only this
+        file)."""
+        import importlib
         import NeuroWorkflowLib
+        import StaticNeuroPETLib
         NeuroWorkflowLib.reloadModules()
+        importlib.reload(StaticNeuroPETLib)
+        for name in StaticNeuroPETLib.MODULES:
+            importlib.reload(importlib.import_module("StaticNeuroPETLib." + name))
         ScriptedLoadableModuleWidget.onReload(self)
 
 
@@ -363,7 +477,11 @@ class DynamicNeuroPETTest(ScriptedLoadableModuleTest):
 
     def test_Widget(self):
         widget = slicer.modules.dynamicneuropet.widgetRepresentation().self()
-        for key, _, _, _ in STEPS:
+        self.assertEqual([k for k, *_ in widget.STEPS][-1], STEP_COMPARE)
+        self.assertFalse(widget.REVIEW_MEAN_MASK)
+        self.assertEqual(widget._defaultReviewLayout(), nr.LAYOUT_SLICES)
+        self.assertIsNone(widget.reviewVolume())            # no maps yet
+        for key, _, _, _ in DYNAMIC_STEPS:
             widget.showStep(key, enterStep=False)
             self.assertEqual(widget.current, key)
             self.assertEqual(widget.stack.count, 1)

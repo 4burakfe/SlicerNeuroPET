@@ -13,8 +13,8 @@ import vtk
 
 from NeuroPETLib import neuroreview as nr, peel, ssp
 
-from StaticNeuroPETLib.constants import (MONITOR2_PLACE_DELAY_MS, REVIEW_OUTLINE_THICKNESS, SSP_SETUP_DELAY_MS,
-                                         STEP_REVIEW)
+from StaticNeuroPETLib.constants import (MONITOR2_PLACE_DELAY_MS, NO_SCORE_NOTE, REVIEW_OUTLINE_THICKNESS,
+                                         SSP_SETUP_DELAY_MS, STEP_REVIEW)
 from StaticNeuroPETLib.helpers import _mainViewportAttributes, _showOnSecondScreen
 
 
@@ -112,7 +112,7 @@ class ReviewLayoutMixin:
         return ssp.hasMedial(data["surface"]) if data else True
 
     def _enterReviewViews(self):
-        if self.volume() is None:
+        if self.reviewVolume() is None:
             return
         layoutManager = slicer.app.layoutManager()
         if layoutManager is None:
@@ -223,6 +223,7 @@ class ReviewLayoutMixin:
         self._hoverNames(False)
         self._endFlash()
         self._syncCameras(False)
+        self._noScoreNote(False)
         self._restoreSegmentationDisplay()
         layoutManager = slicer.app.layoutManager()
         if layoutManager is not None and layoutManager.layout in nr.LAYOUT_IDS:
@@ -261,20 +262,39 @@ class ReviewLayoutMixin:
             if fit:
                 widget.sliceLogic().FitSliceToAll()
         self._outlineSegmentation(sliceViews)
+        rainbow = getattr(self, "rainbowPetNode", None)
+        self._noScoreNote(rainbow is not None and any(node is rainbow for node in layers(nr.SCORE_ROW)[:2]))
         self._setupSspViews(fit)
         self._setupPeelViews(fit)
         self._updateLegends()
 
+    def _noScoreNote(self, shown):
+        """NO_SCORE_NOTE in the lower left corner of the score slices (shown), or taken off."""
+        for row, widget in self._reviewSliceWidgets():
+            if row != nr.SCORE_ROW:
+                continue
+            try:
+                view = widget.sliceView()
+                view.cornerAnnotation().SetText(0, NO_SCORE_NOTE if shown else "")
+                view.scheduleRender()
+            except Exception:
+                logging.warning("Static Neuro: could not write the score slices' note", exc_info=True)
+
     def _reviewLayers(self):
         """A function row -> (background, foreground, opacity) of the review's slice views of that row."""
-        pet = self.volume()
+        pet = self.reviewVolume()
         anatomy = self._fusionVolume()
         score = self.scoreNode if self.scoreNode is not None and slicer.mrmlScene.IsNodePresent(self.scoreNode) \
             else None
         colored = self._scoreColorsNode() if score is not None else None
         greyPet = []        # made once, when a row needs it
+        rainbow = self._rainbowPet() if score is None and pet is not None else None
 
         def layers(row):
+            if row == nr.SCORE_ROW and rainbow is not None:      # no scores: the image in rainbow colors
+                if anatomy is not None:
+                    return anatomy, rainbow, float(self.scoreOpacity.value)
+                return rainbow, None, 0.0
             top = pet if row == nr.PET_ROW else score
             rowColored = colored if row == nr.SCORE_ROW else None
             if rowColored is not None and anatomy is not None:     # the colored PET over the fusion image

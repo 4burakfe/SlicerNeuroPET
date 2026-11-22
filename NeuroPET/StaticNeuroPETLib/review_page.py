@@ -27,6 +27,55 @@ class ReviewPageMixin:
     """The review page methods of StaticNeuroPETWidget."""
 
     REVIEW_MEAN_MASK = True     # default of "Score only where the normal mean > 5 %" (Dynamic Compare: off)
+    DISPLAY_SETTINGS_KEY = SETTINGS_DISPLAY     # the saved display settings (each module its own)
+    NO_DATABASE_TEXT = "No database: the regional values (SUV, SUVR to the reference region) only."
+    COMPARE_TEXT = ("Compare with the database", "Compute the regional values")     # (with, without a database)
+
+    # --- hooks: what the review compares (the Dynamic Neuro Compare step: a parametric map) ---------------------
+    def reviewVolume(self):
+        """The patient's image the review compares and shows (the normalized PET / SPECT here)."""
+        return self.volume()
+
+    def _reviewHeader(self, folder):
+        """The database header the review compares with (None: regional values only)."""
+        return self._header(folder)
+
+    def _reviewAgeAndSex(self):
+        return self.logic.ageAndSex(self.reviewVolume())
+
+    def _reviewReferenceId(self):
+        """The reference segment the patient's values are divided by without a database (None: not divided)."""
+        referenceId = self._parameter().GetParameter(NEURO_PREFIX + "ReferenceSegment") or None
+        segmentation = self.node("Segmentation")
+        if referenceId and (segmentation is None or segmentation.GetSegmentation().GetSegment(referenceId) is None):
+            return None
+        return referenceId
+
+    def _adjustReviewResult(self, result):
+        """The comparison's result before it is shown (the Dynamic Compare step: the regions' TAC fit values)."""
+        return result
+
+    def _reviewReady(self, volume, segmentation, header):
+        """Whether Compare can run."""
+        normalized = volume is not None and bool(volume.GetAttribute(NEURO_PREFIX + "Template"))
+        return normalized and segmentation is not None and (
+            header is None or bool((header.get("statistics") or {}).get("groups")))
+
+    def _reviewImageLine(self, volume):
+        return (f"Image: {volume.GetName() if volume else 'none'}"
+                + (" (normalized)" if volume is not None and volume.GetAttribute(NEURO_PREFIX + "Template") else ""))
+
+    @staticmethod
+    def _defaultReviewLayout():
+        return nr.defaultLayout(_screenCount())
+
+    def _regionValueTitle(self):
+        """The region table's column (and the mouse text) of the patient's regional value."""
+        return "SUVmean"
+
+    def _isFusionExcluded(self, node):
+        """A normalized volume that is not offered as the fusion image (the static images)."""
+        return self.logic.isStaticImage(node)
 
     # --- page 5: review (placeholder) and adding the patient to a database ------------------------------
     def _buildReviewPage(self):
@@ -115,7 +164,7 @@ class ReviewPageMixin:
         self.layoutCombo = qt.QComboBox()
         for key, title in nr.LAYOUTS:
             self.layoutCombo.addItem(title, key)
-        self.layoutCombo.setCurrentIndex(max(0, self.layoutCombo.findData(nr.defaultLayout(_screenCount()))))
+        self.layoutCombo.setCurrentIndex(max(0, self.layoutCombo.findData(self._defaultReviewLayout())))
         self.layoutCombo.toolTip = ("Single monitor: the slices, the 3D-SSP and the region table together. Dual "
                                     "monitor (the default with two screens): the slices and the table here, the "
                                     "3D-SSP views in a window on the second screen. Or the slices and the table, or "
@@ -334,6 +383,57 @@ class ReviewPageMixin:
         self.restoreDisplayButton.connect("clicked()", self.onRestoreDisplay)
         self.factoryDisplayButton.connect("clicked()", self.onFactoryDisplay)
 
+    def _resetReviewState(self):
+        """A closed scene: the review's observers taken off the views and its nodes and caches forgotten."""
+        # the views' interactors and the slice and camera nodes of the layout outlive the scene: the review's
+        # observers are taken off them before they are forgotten below (else every closed scene left one more
+        # set on them and the next review handled each event once more)
+        for stop in (self._watchCutSlices, self._watchMouse, self._syncCameras, self._watchPeelWheel):
+            try:
+                stop(False)
+            except Exception:
+                logging.exception("Static Neuro: could not remove the review's observers")
+        self.reviewResult = self.scoreNode = self.reviewTable = self.greyPetNode = self.rainbowPetNode = None
+        self._brightnessCache = None
+        self.sspModels = {}
+        self.cutModels = {}
+        self.peelNodes = {}
+        self._peelDepth = None
+        self._peelRays = None
+        self._peelHighlighted = 0
+        self._peelMaps = {}
+        self._peelWheelObservers = []
+        self._peelTexts = {}
+        self._cutSliceObservers = []
+        self._cutClipNodes = {}
+        self._cutFacePlanes = {}
+        self._sspMainDisplay = None
+        self._sspLowDisplay = None
+        self._sspPolys = {}
+        self._mouseObservers = {}
+        self._drag = None
+        self._sspLabels = None
+        self._sspOutlineModels = {}
+        self._sspOutlineSurfaces = {}
+        self._sspAllOutlineModels = {}
+        self._sspBorderPolys = {}
+        self._sspOutlineLabel = None
+        self._sspColorsWritten = {}
+        self._sspBounds = None
+        self.scoreRgbNode = None
+        self._cameraObservers = []
+        self._segmentationDisplay = None
+        self._anatomyWindowFor = None
+        self._flash = self._autoCompared = None
+        self._regionTableData = None
+        if getattr(self, "regionTable", None) is not None:
+            try:
+                self.regionTable.setRowCount(0)
+            except Exception:
+                self.regionTable = None
+        if hasattr(self, "compareLabel"):
+            self.compareLabel.text = ""
+
     # saved display settings
     def _displayWidgets(self):
         """{key: widget} of the review display settings that are saved (with the layout, not the image windows)."""
@@ -386,22 +486,21 @@ class ReviewPageMixin:
                 if quiet:
                     widget.blockSignals(False)
 
-    @staticmethod
-    def _savedDisplay():
+    def _savedDisplay(self):
         try:
-            return json.loads(str(qt.QSettings().value(SETTINGS_DISPLAY) or "") or "{}")
+            return json.loads(str(qt.QSettings().value(self.DISPLAY_SETTINGS_KEY) or "") or "{}")
         except ValueError:
             return {}
 
     def onSaveDisplay(self):
-        qt.QSettings().setValue(SETTINGS_DISPLAY, json.dumps(self._displayValues()))
+        qt.QSettings().setValue(self.DISPLAY_SETTINGS_KEY, json.dumps(self._displayValues()))
         slicer.util.showStatusMessage("Static Neuro: display settings saved as the defaults", 3000)
 
     def onRestoreDisplay(self):
         self._setDisplayValuesAndLayout(self._savedDisplay() or self._factoryDisplay)
 
     def onFactoryDisplay(self):
-        qt.QSettings().remove(SETTINGS_DISPLAY)
+        qt.QSettings().remove(self.DISPLAY_SETTINGS_KEY)
         self._setDisplayValuesAndLayout(self._factoryDisplay)
 
     def _setDisplayValuesAndLayout(self, values):
@@ -412,8 +511,7 @@ class ReviewPageMixin:
             self._onLayoutPicked()
 
     def _updateReviewInfo(self, volume, segmentation, header, age, sex):
-        lines = [f"Image: {volume.GetName() if volume else 'none'}"
-                 + (" (normalized)" if volume is not None and volume.GetAttribute(NEURO_PREFIX + "Template") else ""),
+        lines = [self._reviewImageLine(volume),
                  "Age: " + (f"{age:g}" if age is not None else "unknown") + ", sex: "
                  + (dict(sn.SEXES).get(sex) if sex else "unknown"),
                  f"Regions: {segmentation.GetName() if segmentation else 'not loaded (step 4)'}"]
@@ -428,17 +526,15 @@ class ReviewPageMixin:
             elif stats.get("stale"):
                 lines.append(WARNING_STYLE.format("Subjects were added after the mean / SD maps were computed."))
         else:
-            lines.append("No database: the regional values (SUV, SUVR to the reference region) only.")
+            lines.append(self.NO_DATABASE_TEXT)
         result = self.reviewResult
         if result is not None and (result.get("volume") is not volume or result.get("header") != header):
             lines.append(WARNING_STYLE.format("The image or the database changed: compare again."))
         self.reviewLabel.text = "<br>".join(lines)
         self._fillGroups(header, age)
         self.groupCombo.enabled = header is not None and self.groupCombo.count > 1
-        self.compareButton.text = "Compare with the database" if header is not None else "Compute the regional values"
-        normalized = volume is not None and bool(volume.GetAttribute(NEURO_PREFIX + "Template"))
-        self.compareButton.enabled = normalized and segmentation is not None and (
-            header is None or bool((header.get("statistics") or {}).get("groups")))
+        self.compareButton.text = self.COMPARE_TEXT[0 if header is not None else 1]
+        self.compareButton.enabled = bool(self._reviewReady(volume, segmentation, header))
         self._fillFusionSources()
 
     def _fillGroups(self, header, age):
@@ -471,12 +567,14 @@ class ReviewPageMixin:
         """The patient's volumes in the template space for the fusion: the normalized CT / MR first, then the other
         normalized sequences (and any other normalized anatomical volume)."""
         first = self.node("NormalizedAnatomy")
-        skip = {n.GetID() for n in (self.volume(), getattr(self, "greyPetNode", None), self.scoreNode) if n is not None}
+        skip = {n.GetID() for n in (self.reviewVolume(), getattr(self, "greyPetNode", None),
+                                    getattr(self, "rainbowPetNode", None), self.scoreNode)
+                if n is not None}
         nodes = []
         for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
             if (node.GetID() in skip or node.IsA("vtkMRMLLabelMapVolumeNode") or node.GetHideFromEditors()
                     or node.GetAttribute(ATLAS_FILE_ATTRIBUTE) or not node.GetAttribute(NEURO_PREFIX + "Template")
-                    or self.logic.isStaticImage(node)):
+                    or self._isFusionExcluded(node)):
                 continue
             nodes.append(node)
         nodes.sort(key=lambda n: n is not first)
@@ -517,17 +615,15 @@ class ReviewPageMixin:
         return None
 
     def onCompare(self):
-        volume, segmentation = self.volume(), self.node("Segmentation")
+        volume, segmentation = self.reviewVolume(), self.node("Segmentation")
         if volume is None or segmentation is None:
             return
         folder = self._database()
-        header = self._header(folder)
+        header = self._reviewHeader(folder)
         removed = self.logic.dropSegments(segmentation)
-        age, _ = self.logic.ageAndSex(volume)
+        age, _ = self._reviewAgeAndSex()
         groupKey = self._groupKey(header, age) if header is not None else normaldb.MASTER
-        referenceId = self._parameter().GetParameter(NEURO_PREFIX + "ReferenceSegment") or None
-        if referenceId and segmentation.GetSegmentation().GetSegment(referenceId) is None:
-            referenceId = None
+        referenceId = self._reviewReferenceId()
         dialog = slicer.util.createProgressDialog(windowTitle="Review", labelText="Comparing...", maximum=0)
 
         def progress(index, total, text):
@@ -543,6 +639,8 @@ class ReviewPageMixin:
             result = self.logic.reviewData(volume, segmentation, folder if header is not None else None, header,
                                            groupKey, self.atlas, referenceId, self._locked(), progress,
                                            meanMask=bool(self.meanMaskCheck.checked))
+            if result is not None:
+                result = self._adjustReviewResult(result)
             if result is not None:
                 try:
                     result["ssp"] = self.logic.reviewSsp(result, folder, header, groupKey, self._locked(), progress)
@@ -600,9 +698,9 @@ class ReviewPageMixin:
         per image, regions and database: not again after a failure or a stop)."""
         if getattr(self, "current", None) != STEP_REVIEW or not self.compareButton.enabled:
             return
-        volume, segmentation = self.volume(), self.node("Segmentation")
+        volume, segmentation = self.reviewVolume(), self.node("Segmentation")
         folder = self._database()
-        header = self._header(folder)
+        header = self._reviewHeader(folder)
         result = self.reviewResult
         meanMask = bool(self.meanMaskCheck.checked)
         if (result is not None and result.get("volume") is volume and result.get("header") == header
@@ -686,10 +784,10 @@ class ReviewPageMixin:
     def _updateReviewPage(self):
         if not hasattr(self, "reviewLabel"):
             return
-        volume = self.volume()
+        volume = self.reviewVolume()
         segmentation = self.node("Segmentation")
-        header = self._header(self._database())
-        age, sex = self.logic.ageAndSex(volume)
+        header = self._reviewHeader(self._database())
+        age, sex = self._reviewAgeAndSex()
         self._updateReviewInfo(volume, segmentation, header, age, sex)
         if hasattr(self, "subjectIdEdit"):
             key = volume.GetID() if volume is not None else ""

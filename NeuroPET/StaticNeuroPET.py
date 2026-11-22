@@ -269,14 +269,7 @@ class StaticNeuroPETWidget(ToolbarMixin,
     def onSceneClose(self, caller, event):
         NeuroWorkflowWidget.onSceneClose(self, caller, event)
         self._closeRegSession()
-        # the views' interactors and the slice and camera nodes of the layout outlive the scene: the review's
-        # observers are taken off them before they are forgotten below (else every closed scene left one more
-        # set on them and the next review handled each event once more)
-        for stop in (self._watchCutSlices, self._watchMouse, self._syncCameras, self._watchPeelWheel):
-            try:
-                stop(False)
-            except Exception:
-                logging.exception("Static Neuro: could not remove the review's observers")
+        self._resetReviewState()
         self._regionsPreviousLayout = None
         self._regionsHelpers = None
         self.regResult = None
@@ -284,46 +277,6 @@ class StaticNeuroPETWidget(ToolbarMixin,
         self._databaseKey = None
         self._patientTexts = {}
         self._contrastFor = None
-        self.reviewResult = self.scoreNode = self.reviewTable = self.greyPetNode = None
-        self._brightnessCache = None
-        self.sspModels = {}
-        self.cutModels = {}
-        self.peelNodes = {}
-        self._peelDepth = None
-        self._peelRays = None
-        self._peelHighlighted = 0
-        self._peelMaps = {}
-        self._peelWheelObservers = []
-        self._peelTexts = {}
-        self._cutSliceObservers = []
-        self._cutClipNodes = {}
-        self._cutFacePlanes = {}
-        self._sspMainDisplay = None
-        self._sspLowDisplay = None
-        self._sspPolys = {}
-        self._mouseObservers = {}
-        self._drag = None
-        self._sspLabels = None
-        self._sspOutlineModels = {}
-        self._sspOutlineSurfaces = {}
-        self._sspAllOutlineModels = {}
-        self._sspBorderPolys = {}
-        self._sspOutlineLabel = None
-        self._sspColorsWritten = {}
-        self._sspBounds = None
-        self.scoreRgbNode = None
-        self._cameraObservers = []
-        self._segmentationDisplay = None
-        self._anatomyWindowFor = None
-        self._flash = self._autoCompared = None
-        self._regionTableData = None
-        if getattr(self, "regionTable", None) is not None:
-            try:
-                self.regionTable.setRowCount(0)
-            except Exception:
-                self.regionTable = None
-        if hasattr(self, "compareLabel"):
-            self.compareLabel.text = ""
         if hasattr(self, "regLabel"):
             self.regLabel.text = "Not registered."
 

@@ -351,12 +351,18 @@ class ReviewSspMixin:
         first = {}
         for row, widget in self._reviewSliceWidgets():
             first.setdefault(row, widget.mrmlSliceNode().GetID())
-        volume = self.volume()
+        volume = self.reviewVolume()
         if volume is not None:
             self._legend(volume, [first[nr.PET_ROW]] if nr.PET_ROW in first else [], self._petUnits(volume), "%.2f")
+        rainbow = getattr(self, "rainbowPetNode", None)
         if self.scoreNode is not None and slicer.mrmlScene.IsNodePresent(self.scoreNode):
             self._legend(self.scoreNode, [first[nr.SCORE_ROW]] if nr.SCORE_ROW in first else [], self._scoreKind(),
                          "%.1f")
+            if rainbow is not None and slicer.mrmlScene.IsNodePresent(rainbow):
+                self._legend(rainbow, [], "", "%.2f")      # hidden
+        elif volume is not None and rainbow is not None and slicer.mrmlScene.IsNodePresent(rainbow):
+            self._legend(rainbow, [first[nr.SCORE_ROW]] if nr.SCORE_ROW in first else [], self._petUnits(volume),
+                         "%.2f")     # no scores: the image in rainbow colors
 
     def _petUnits(self, volume):
         units = self.logic.imageInfo(volume).get("units") or ""

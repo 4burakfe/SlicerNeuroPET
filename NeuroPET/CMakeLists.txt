@@ -13,6 +13,7 @@ set(NEURO_LIB_SCRIPTS
   NeuroPETLib/banner.py
   NeuroPETLib/credits.py
   NeuroPETLib/dbdownload.py
+  NeuroPETLib/dynamicneuro.py
   NeuroPETLib/neuro.py
   NeuroPETLib/neuroreview.py
   NeuroPETLib/normaldb.py
@@ -26,6 +27,7 @@ set(NEURO_LIB_SCRIPTS
 set(NEURO_WORKFLOW_LIB_SCRIPTS
   NeuroWorkflowLib/__init__.py
   NeuroWorkflowLib/base.py
+  NeuroWorkflowLib/compare.py
   NeuroWorkflowLib/database.py
   NeuroWorkflowLib/scenestate.py
   )

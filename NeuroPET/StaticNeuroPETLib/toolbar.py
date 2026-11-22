@@ -41,6 +41,12 @@ class ToolbarMixin:
         else:
             self._patientAction = toolbar.addWidget(self.patientLabel)
         self._patientAction.setVisible(False)
+        self._addReviewTools(toolbar)
+        return toolbar
+
+    def _addReviewTools(self, toolbar):
+        """The Panel button and the review's tools (layouts, slices, 3D-SSP, colors, table; shown on the review
+        step only) at the end of the workflow toolbar."""
         panelButton = qt.QToolButton()
         panelButton.setText("Panel")
         panelButton.toolTip = "Show / hide the module panel on the left (more room for the views)"
@@ -79,7 +85,6 @@ class ToolbarMixin:
         self._reviewToolActions.append(toolbar.addWidget(tableButton))
         for action in self._reviewToolActions:
             action.setVisible(False)
-        return toolbar
 
     @staticmethod
     def _toggleModulePanel():

@@ -178,7 +178,7 @@ class ReviewPeelMixin:
         nodes = getattr(self, "peelNodes", None) or {}
         if not nodes:
             return
-        pet = self.volume()
+        pet = self.reviewVolume()
         anatomy = getattr(self, "_peelAnatomyNode", None)
         for key, _ in nr.PEEL_VIEWS:
             for name, source, petColors in ((f"{key} PET", pet, True), (f"{key} anatomy", anatomy, False)):
@@ -308,7 +308,7 @@ class ReviewPeelMixin:
     def _updatePeelSlices(self, anatomy, shell, fit):
         """The top row: the PET over the anatomy (fusion opacity) with the shell's lines (outer: the hull, inner: the
         maps' depth); the anatomy alone, else the PET alone."""
-        petNode = self._peelPetVolume(self.volume())
+        petNode = self._peelPetVolume(self.reviewVolume())
         background, foreground = (anatomy, petNode) if anatomy is not None else (petNode, None)
         for orientation, widget in self._peelSliceWidgets().items():
             composite = widget.mrmlSliceCompositeNode()
@@ -426,7 +426,7 @@ class ReviewPeelMixin:
         depthMm = float(self.peelDepthSpin.value)
         labels = result["labels"][0]
         anatomy = self._peelAnatomy()
-        pet = self.volume()
+        pet = self.reviewVolume()
         colors = self._cutFaceColors()
         score = self.scoreNode if self.scoreNode is not None and slicer.mrmlScene.IsNodePresent(self.scoreNode) \
             else None
@@ -576,8 +576,8 @@ class ReviewPeelMixin:
                     first[row] = (key, widgets[(row, key)].mrmlSliceNode().GetID())
         pet = (getattr(self, "peelNodes", None) or {}).get(f"{first[nr.PET_ROW][0]} PET") if nr.PET_ROW in first \
             else None
-        if pet is not None and self.volume() is not None:
-            self._legend(pet, [first[nr.PET_ROW][1]], self._petUnits(self.volume()), "%.2f")
+        if pet is not None and self.reviewVolume() is not None:
+            self._legend(pet, [first[nr.PET_ROW][1]], self._petUnits(self.reviewVolume()), "%.2f")
         scores = (getattr(self, "peelNodes", None) or {}).get(f"{first[nr.SCORE_ROW][0]} scores") \
             if nr.SCORE_ROW in first else None
         if scores is not None:

@@ -40,7 +40,8 @@ class ReviewTableMixin:
         compared = result.get("ratio") and units in (normaldb.MAP_SUVR, normaldb.MAP_RATIO, "SUVR")
         scored = result.get("header") is not None
         # the score (the most important) right after the region's name
-        columns = ["Region"] + ([kind] if scored else []) + ["SUVmean"] + ([units or "SUVR"] if compared else [])
+        columns = (["Region"] + ([kind] if scored else []) + [self._regionValueTitle()]
+                   + ([units or "SUVR"] if compared else []))
         if scored:
             columns += ["Normal (mean ± SD)"]
         table = vtk.vtkTable()

@@ -12,9 +12,9 @@ import vtk
 from DICOMGatedDynamicPETLib import colormaps, colortables
 from NeuroWorkflowLib.base import _ijkToRas, _percentiles, _vtkMatrix
 from NeuroWorkflowLib.scenestate import unsaved
-from NeuroPETLib import neuroreview as nr
+from NeuroPETLib import neuroreview as nr, ssp
 
-from StaticNeuroPETLib.constants import SCORE_COLOR_NODE, STEP_REVIEW
+from StaticNeuroPETLib.constants import NO_SCORE_COLOR_NODE, NO_SCORE_COLORMAP, SCORE_COLOR_NODE, STEP_REVIEW
 
 
 class ReviewColorsMixin:
@@ -197,7 +197,7 @@ class ReviewColorsMixin:
 
     def _initPetWindow(self, percentile=False):
         """The PET window: 0 to the maximum (default), or 0 to the 99.5th percentile."""
-        volume = self.volume()
+        volume = self.reviewVolume()
         if volume is None:
             return
         low, high = _percentiles(volume, 0.0, 99.5)
@@ -211,7 +211,7 @@ class ReviewColorsMixin:
         self._applyPetDisplay()
 
     def _applyPetDisplay(self):
-        volume = self.volume()
+        volume = self.reviewVolume()
         if volume is None or self.current != STEP_REVIEW and self.reviewResult is None:
             return
         display = volume.GetDisplayNode()
@@ -222,9 +222,9 @@ class ReviewColorsMixin:
         display.SetAutoWindowLevel(False)
         low, high = self.petWindowRange.minimumValue, self.petWindowRange.maximumValue
         display.SetWindowLevelMinMax(low, max(high, low + 1e-6))
-        grey = getattr(self, "greyPetNode", None)
-        if grey is not None and slicer.mrmlScene.IsNodePresent(grey) and grey.GetDisplayNode() is not None:
-            grey.GetDisplayNode().SetWindowLevelMinMax(low, max(high, low + 1e-6))
+        for copy in (getattr(self, "greyPetNode", None), getattr(self, "rainbowPetNode", None)):
+            if copy is not None and slicer.mrmlScene.IsNodePresent(copy) and copy.GetDisplayNode() is not None:
+                copy.GetDisplayNode().SetWindowLevelMinMax(low, max(high, low + 1e-6))
         fused = self._fusionVolume() is not None
         display.SetApplyThreshold(fused)
         if fused:
@@ -235,24 +235,34 @@ class ReviewColorsMixin:
     def _greyPet(self):
         """The PET in grey under the score slices: a second volume node sharing the PET's voxels (no copy), with the
         PET window."""
-        pet = self.volume()
+        return self._petCopy("greyPetNode", "Neuro review PET (grey)", "vtkMRMLColorTableNodeGrey")
+
+    def _rainbowPet(self):
+        """The PET in rainbow colors in the score slices when there are no scores (no database compared)."""
+        colors = self._sspColorNode(ssp.surfaceColors(self._rgbOf(NO_SCORE_COLORMAP)), NO_SCORE_COLOR_NODE)
+        return self._petCopy("rainbowPetNode", "Neuro review PET (rainbow)", colors.GetID())
+
+    def _petCopy(self, attribute, title, colorNodeId):
+        """A second volume node of the PET sharing its voxels (no copy) with another color table and the PET
+        window, kept as self.<attribute>."""
+        pet = self.reviewVolume()
         if pet is None:
             return None
         scene = slicer.mrmlScene
-        node = getattr(self, "greyPetNode", None)
+        node = getattr(self, attribute, None)
         if node is None or not scene.IsNodePresent(node):
-            node = scene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", scene.GenerateUniqueName("Neuro review PET (grey)"))
+            node = scene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", scene.GenerateUniqueName(title))
             node.SetHideFromEditors(True)
             node.CreateDefaultDisplayNodes()
             unsaved(node)       # shares the PET's voxels: not written again with the scene
-            self.greyPetNode = node
+            setattr(self, attribute, node)
         if node.GetImageData() is not pet.GetImageData():
             node.SetAndObserveImageData(pet.GetImageData())
         matrix = vtk.vtkMatrix4x4()
         pet.GetIJKToRASMatrix(matrix)
         node.SetIJKToRASMatrix(matrix)
         display = node.GetDisplayNode()
-        display.SetAndObserveColorNodeID("vtkMRMLColorTableNodeGrey")
+        display.SetAndObserveColorNodeID(colorNodeId)
         display.SetAutoWindowLevel(False)
         low, high = self.petWindowRange.minimumValue, self.petWindowRange.maximumValue
         display.SetWindowLevelMinMax(low, max(high, low + 1e-6))

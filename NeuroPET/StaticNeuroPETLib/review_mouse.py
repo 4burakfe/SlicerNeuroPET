@@ -38,13 +38,13 @@ class ReviewMouseMixin:
             "window (right / up wider).</li>"
             "<li>Wheel: next / previous slice. Ctrl + wheel: zoom. Middle drag: pan.</li>"
             "<li>Shift + move: the other views follow the mouse.</li>"
-            "<li>Mouse over a region: its name, SUVmean and score.</li>"
+            "<li>Mouse over a region: its name, regional value and score.</li>"
             "<li>Click a region in the table: it is shown alone for a few seconds.</li></ul>"
             "<b>3D-SSP</b><ul style='margin-left:-20px'>"
             "<li>Left drag: rotate the view (Restore 3D views turns it back).</li>"
             "<li>Right click: the view's menu. Right drag: score window (the patient window with the Patient map).</li>"
             "<li>Wheel: zoom. Middle drag: pan. Zoom and pan are the same in all the 3D-SSP views.</li>"
-            "<li>Mouse over the surface: the region's name, SUVmean and score; its outline is drawn in white in "
+            "<li>Mouse over the surface: the region's name, regional value and score; its outline is drawn in white in "
             "every 3D-SSP view.</li></ul>")
         label.wordWrap = True
         label.setTextFormat(qt.Qt.RichText)
@@ -147,7 +147,8 @@ class ReviewMouseMixin:
         suv, score = (getattr(self, "_hoverValues", None) or {}).get(name, (None, None))
         parts = [name]
         if suv is not None and np.isfinite(suv):
-            parts.append(f"SUVmean {suv:.2f}")
+            parts.append(f"{self._regionValueTitle()} {suv:.3g}" if self._regionValueTitle() != "SUVmean"
+                         else f"SUVmean {suv:.2f}")
         if score is not None and np.isfinite(score):
             parts.append(f"{getattr(self, '_hoverKind', '') or self._scoreKind()} {score:+.2f}")
         return ("\n" if stacked else "   ").join(parts)       # stacked (one value a line) on the 3D-SSP
@@ -370,7 +371,7 @@ class ReviewMouseMixin:
 
     def _cutHover(self, interactor, view):
         """The region under the mouse on a cut 3D-SSP view (the cut face: the voxel's region; the surface: its nearest
-        vertex's): its name, SUVmean and score next to the mouse."""
+        vertex's): its name, regional value and score next to the mouse."""
         result = self.reviewResult or {}
         if result.get("labels") is None or result.get("grid") is None:
             return

@@ -51,6 +51,10 @@ REVIEW_SSP_PATIENT_COLORMAP = "PET-DICOM"       # the 3D-SSP of the patient's pr
 REVIEW_PEEL_PET_COLORMAP = "Hel"          # the PET of the unfolded brain maps (and its fusion)
 REVIEW_SCORE_COLORMAP = nr.SCORE_COLORMAPS[0]     # diverging: below the normals cold, above hot
 SCORE_COLOR_NODE = "Neuro review score colors"
+# no scores (no database compared): the image in these colors in the score slices, with NO_SCORE_NOTE in a corner
+NO_SCORE_COLORMAP = "SSP_Rainbow"
+NO_SCORE_COLOR_NODE = "Neuro review no-score colors"
+NO_SCORE_NOTE = "No database compared: the image in rainbow colors, no scores"
 REVIEW_FUSION_OPACITY = 0.6
 REVIEW_SCORE_OPACITY = 0.5              # the score map over the MR (fusion): semi-transparent
 REVIEW_OUTLINE_THICKNESS = 1            # px, the region outlines on the slices
