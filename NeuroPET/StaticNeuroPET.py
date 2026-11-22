@@ -152,6 +152,7 @@ class StaticNeuroPETWidget(ToolbarMixin,
     STEP_AFTER_REGIONS = STEP_REVIEW
     BANNER_STEPS = (STEP_DATA, STEP_REVIEW)
     NORM_METHODS = METHODS
+    NORM_IMAGE_CHOICE = False       # the static image itself is registered
     LOAD_REGIONS_TEXT = "Load regions and go to review"
     NORM_HARDEN_GRIDS = NORM_HARDEN_GRIDS
     NORM_HARDEN_ACTIONS = NORM_HARDEN_ACTIONS
@@ -519,6 +520,10 @@ class StaticNeuroPETTest(ScriptedLoadableModuleTest):
         self.assertEqual(NORM_HARDEN_GRIDS[0][1], reg.OUTPUT_FIXED_GRID)
         self.assertEqual(NORM_HARDEN_ACTIONS[0][1], reg.OVERWRITE)
         self.assertFalse(widget._anatomyIsMr())
+        self.assertFalse(widget._anatomyMethodFits())     # no CT/MR: the PET to the synthetic PET
+        from NeuroPETLib import neuro
+        self.assertEqual((neuro.dopaWeight("Putamen L"), neuro.dopaWeight("Thalamus R"),
+                          neuro.dopaWeight("Third Ventricle"), neuro.dopaWeight("Insula R")), (1.0, 0.35, 0.0, None))
         for key, _, _, _ in STEPS:
             self.assertFalse(_stepIcon(key, STATE_READY, 1).isNull())
         # batch: the normalization plan of a database without settings, the QC picture

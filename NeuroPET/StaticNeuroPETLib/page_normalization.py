@@ -60,12 +60,12 @@ class NormalizationPageMixin(NormalizationDatabaseMixin):
             self.methodCombo.setCurrentIndex(self.methodCombo.findData(METHOD_PET))
 
     def _defaultMethod(self):
-        """The MR when the study has one, else the PET/SPECT (to the MR template, or to the database's template when
-        its settings say so); until the method is picked by hand."""
+        """The MR when the study has one (a CT when the database has a mean CT), else the PET/SPECT (to the synthetic
+        PET, or to the database's template when its settings say so); until the method is picked by hand."""
         self._updateMethodItems()
         if getattr(self, "_methodChosen", False) or not hasattr(self, "methodCombo") or self.normResult is not None:
             return
-        wanted = METHOD_ANATOMY if self._anatomyIsMr() else METHOD_PET
+        wanted = METHOD_ANATOMY if self._anatomyMethodFits() else METHOD_PET
         if self.methodCombo.currentData != wanted:
             self.methodCombo.setCurrentIndex(self.methodCombo.findData(wanted))
 

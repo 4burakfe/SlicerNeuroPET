@@ -301,12 +301,18 @@ class NormalizationDatabaseMixin:
             return
         if header.get("space") and not self.setSpace(header["space"]):
             logging.warning(f"Neuro: the database's space {header['space']} is not offered")
-        if norm.get("method"):
+        # the database's CT/MR method only when the patient's CT/MR fits it (an MR, or a CT with the database's mean
+        # CT); else the default (PET to the synthetic PET) is kept
+        anatomyFits = norm.get("method") != METHOD_ANATOMY or self._anatomyMethodFits()
+        if not anatomyFits:
+            logging.info("Neuro: the database normalizes the CT/MR, the patient has no MR and the database no mean "
+                         "CT: the PET is registered to the synthetic PET")
+        if norm.get("method") and anatomyFits:
             index = self.methodCombo.findData(norm["method"])
             if index >= 0:
                 self.methodCombo.setCurrentIndex(index)
                 self._methodChosen = True
-        if norm.get("template") and self.method() in (METHOD_PET, METHOD_ANATOMY):
+        if norm.get("template") and anatomyFits and self.method() in (METHOD_PET, METHOD_ANATOMY):
             index = self.templateCombo.findData(norm["template"])
             if index >= 0 and self._templateAvailable(norm["template"]):
                 self.templateCombo.setCurrentIndex(index)

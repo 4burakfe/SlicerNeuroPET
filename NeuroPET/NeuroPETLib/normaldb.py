@@ -145,7 +145,8 @@ NORM_METHODS = (("", "Not specified"), (NORM_PET, "PET/SPECT to MR template"),
                 (NORM_ANATOMY, "CT/MR to MR template, same transform to the PET/SPECT"),
                 (NORM_PET_TEMPLATE, "PET/SPECT to PET template (the database's mean)"))
 NORM_TEMPLATES = (("", "Not specified"), ("T1", "T1"), ("GM", "Grey matter probability"),
-                  ("pseudoPET", "Synthetic PET (GM + 0.3 WM)"), ("T2", "T2"), ("PD", "PD"),
+                  ("pseudoPET", "Synthetic PET (GM + 0.3 WM)"),
+                  ("pseudoPETDopa", "Synthetic dopaminergic PET (striatum)"), ("T2", "T2"), ("PD", "PD"),
                   ("ctTemplate", "CT template (CT to CT)"))
 # The subjects' CT / MR (anatomy): optional, any of these contrasts; their means are kept with the statistics and,
 # with an iterative template, as templates of the database ("From DB" volumes: template keys "db:<volume>")

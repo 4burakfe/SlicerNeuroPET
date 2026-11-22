@@ -536,7 +536,7 @@ class NeuroWorkflowLogic(ScriptedLoadableModuleLogic):
         return settings
 
     def normalize(self, sequence, template, method=METHOD_PET, anatomy=None, settings=None, mask=None,
-                  progress=None, ctTemplate=None, ctCorrection=None):
+                  progress=None, ctTemplate=None, ctCorrection=None, petImage=None):
         """Register the PET reference image (METHOD_PET) or the CT/MR (METHOD_ANATOMY) to the template; the result
         of DynamicPETRegistrationLogic.register() (linear matrix, B-spline node, ...) plus "moving". A CT with a CT
         template (in the MNI space, e.g. scct_unsmooth) is registered to that template instead (CT to CT, both
@@ -551,7 +551,7 @@ class NeuroWorkflowLogic(ScriptedLoadableModuleLogic):
             moving = anatomy
             settings["movingFunctional"] = False
         else:
-            moving = self.referenceImage(sequence)
+            moving = petImage if petImage is not None else self.referenceImage(sequence)
         if moving.GetParentTransformNode() is not None:
             raise ValueError(f"'{moving.GetName()}' is under a transform. Harden or remove it first.")
         isCt = method == METHOD_ANATOMY and neuro.looksLikeCt(slicer.util.arrayFromVolume(anatomy))
@@ -783,6 +783,62 @@ class NeuroWorkflowLogic(ScriptedLoadableModuleLogic):
             except Exception:
                 logging.exception("Neuro: could not normalize the CT/MR")
         return undo, newSequence, newSummed, normalized
+
+    def ensureSyntheticPet(self, atlas, key=None):
+        """The path of a synthetic PET template (neuro.GENERATED), made on first use."""
+        if key == neuro.PSEUDO_DOPA:
+            return self.ensurePseudoDopa(atlas)
+        return self.ensurePseudoPet(atlas)
+
+    def ensurePseudoDopa(self, atlas):
+        """The synthetic dopaminergic PET template (neuro.pseudoDopaArray of the grey / white matter maps and the
+        CerebrA labels moved onto their grid): its path, made on first use and again when the CerebrA labels or
+        their table changed; saved next to the synthetic PET (else in Slicer's temporary folder)."""
+        path = neuro.pseudoPetPath(atlas, neuro.PSEUDO_DOPA)
+        if path is None:
+            raise ValueError("The grey and white matter maps (GM, WM) are not in the space's folder.")
+        info = neuro.segmentationInfo(neuro.DEFAULT_SEGMENTATION)
+        if info is None:
+            raise ValueError(f"The {neuro.DEFAULT_SEGMENTATION} segmentation is not in the atlas library.")
+        settingsPath = os.path.splitext(path)[0] + ".json"      # the values it was made with
+        try:
+            with open(settingsPath, encoding="utf-8") as f:
+                same = json.load(f) == neuro.dopaSettings()
+            if same and os.path.getmtime(path) >= max(os.path.getmtime(info["labels"]), os.path.getmtime(info["csv"])):
+                return path
+        except (OSError, ValueError):
+            pass
+        entries = neuro.labelTable(neuro.readCerebraLabels(info["csv"]))[0]
+        labelsPath = self.segmentationLabelMap(info)
+        scene = slicer.mrmlScene
+        gm = wm = labelNode = node = None
+        try:
+            gm = slicer.util.loadVolume(atlas["GM"], {"show": False})
+            wm = slicer.util.loadVolume(atlas["WM"], {"show": False})
+            labels, labelNode = self._loadLabels(labelsPath)
+            gmArray = slicer.util.arrayFromVolume(gm)
+            labels = neuro.resampleLabelsNearest(labels, _ijkToRas(labelNode), gmArray.shape, _ijkToRas(gm))
+            spacing = tuple(float(x) for x in gm.GetSpacing())[::-1]
+            array = neuro.pseudoDopaArray(gmArray, slicer.util.arrayFromVolume(wm), labels, entries, spacing)
+            node = scene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "MNI synthetic dopaminergic PET")
+            node.SetIJKToRASMatrix(_vtkMatrix(_ijkToRas(gm)))
+            slicer.util.updateVolumeFromArray(node, array)
+            for folder in (os.path.dirname(path), slicer.app.temporaryPath):
+                target = os.path.join(folder, os.path.basename(path))
+                if slicer.util.saveNode(node, target):
+                    try:
+                        with open(os.path.splitext(target)[0] + ".json", "w", encoding="utf-8") as f:
+                            json.dump(neuro.dopaSettings(), f)
+                    except OSError:
+                        logging.warning("Neuro: could not save the synthetic dopaminergic PET's settings")
+                    logging.info(f"Neuro: synthetic dopaminergic PET template saved as {target}")
+                    return target
+                logging.warning(f"Neuro: could not save the synthetic dopaminergic PET template in {folder}")
+            raise RuntimeError("Could not save the synthetic dopaminergic PET template.")
+        finally:
+            for item in (gm, wm, labelNode, node):
+                if item is not None and scene.IsNodePresent(item):
+                    scene.RemoveNode(item)
 
     def ensurePseudoPet(self, atlas):
         """The synthetic PET template (neuro.pseudoPetArray of the grey and white matter maps): its path, made on
@@ -1369,6 +1425,7 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     STEP_AFTER_REGIONS = STEP_MODEL
     BANNER_STEPS = (STEP_DATA,)     # the Mergen banner at the top of the panel on these steps
     NORM_METHODS = METHODS
+    NORM_IMAGE_CHOICE = True        # the PET image registered can be picked (Dynamic: the summed image by default)
     LOAD_REGIONS_TEXT = "Load regions and go to modeling"
     NORM_HARDEN_GRIDS = NORMALIZATION_GRIDS         # the first one the default of the Harden dialog
     # Overwrite first (the default): a second copy of a dynamic series takes a lot of memory
@@ -2274,6 +2331,16 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                                       "brain activity on the template's head; geometric centers (default for the "
                                       "CT/MR) aligns the volume centres.")
         settingsForm.addRow("Initialization:", self.normInitCombo)
+        self.normImageSelector = self._nodeSelector(
+            ["vtkMRMLScalarVolumeNode"],
+            "The PET image registered to the template (PET methods): the series' summed image by default, or another "
+            "image on the series (e.g. a sum of early frames, one frame). The transform found moves every frame.")
+        self.normImageSelector.noneDisplay = "Summed image (default)"
+        self.normImageSelector.showChildNodeTypes = False       # no label maps
+        if self.NORM_IMAGE_CHOICE:
+            form.addRow("Registered image:", self.normImageSelector)
+        else:
+            self.normImageSelector.visible = False
         form.addRow(self.normSettingsBox)
         # what the template is, the references to cite and its license (read only)
         self.templateCredits = credits.infoBox()
@@ -2324,6 +2391,7 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.templateCombo.connect("currentIndexChanged(int)", lambda i: self._updateTemplateCredits())
         self.methodCombo.connect("currentIndexChanged(int)", lambda i: self._updateTemplateCredits())
         self.normalizeButton.connect("clicked()", self.onNormalize)
+        self.normImageSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onNormImageChanged)
         self.normEngineCombo.connect("currentIndexChanged(int)", self.onNormEngineChanged)
         self.normManualButton.connect("toggled(bool)", lambda on: self.normSession and
                                       self.normSession.setManualHandles(on))
@@ -2502,7 +2570,14 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if method == METHOD_ANATOMY:
             contrast, reason = self.contrast()
             key = neuro.templateForContrast(contrast)
+            if contrast == "CT" and self.templateCombo.findData(normaldb.databaseTemplateKey("CT")) >= 0:
+                key = normaldb.databaseTemplateKey("CT")        # the database's mean CT: CT to CT
             note = (f"CT/MR recognised as {contrast} ({reason})." if contrast else f"CT/MR contrast: {reason}.")
+        elif neuro.canMakeTemplate(self.atlas, neuro.PSEUDO_PET):
+            key, note = neuro.PSEUDO_PET, "The PET is registered to the synthetic PET template by default."
+            if self.anatomy() is not None and not self._anatomyMethodFits():
+                note += (" The CT/MR is a CT and the normal database has no mean CT: the PET is registered "
+                         "instead of the CT.")
         else:
             key, note = neuro.DEFAULT_TEMPLATE, "The PET is registered to the T1 template by default."
         chosen = self.templateCombo.currentData
@@ -2605,14 +2680,15 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if key == neuro.CT_TEMPLATE:
             key = neuro.DEFAULT_TEMPLATE
         path = self.atlas.get(key)
-        if not path and key == neuro.PSEUDO_PET and neuro.canMakeTemplate(self.atlas, key):
-            path = self.logic.ensurePseudoPet(self.atlas)
+        if key in neuro.GENERATED and neuro.canMakeTemplate(self.atlas, key) and (
+                not path or key == neuro.PSEUDO_DOPA):
+            path = self.logic.ensureSyntheticPet(self.atlas, key)      # the dopaminergic one remade on new labels
             self.atlas = neuro.atlasFiles(self.spaceId()) or self.atlas
         if not path:
             raise ValueError(f"The space {self.spaceName()} has no {neuro.templateTitle(key)} volume "
                              f"({key}.nrrd in its folder).")
         template = self.logic.loadAtlasVolume(path, name=f"{self.spaceName()} {key}")
-        if key == neuro.PSEUDO_PET:
+        if key in neuro.GENERATED:
             template.SetAttribute(PET_TEMPLATE_ATTRIBUTE, "1")      # a PET: shown in inverted grey
         self.setNode("Template", template)
         return template
@@ -2621,7 +2697,7 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def _isPetTemplate(node):
         """Whether a template is a PET (the synthetic PET, a database's mean PET): shown in inverted grey."""
         return node is not None and (bool(node.GetAttribute(PET_TEMPLATE_ATTRIBUTE))
-                                     or (node.GetName() or "").endswith(" " + neuro.PSEUDO_PET))
+                                     or any((node.GetName() or "").endswith(" " + k) for k in neuro.GENERATED))
 
     @staticmethod
     def _invertedGrey(node):
@@ -2716,7 +2792,8 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
             self.normResult = self.logic.normalize(sequence, template, method, anatomy, settings, mask, progress,
-                                                   ctTemplate=ctTemplate, ctCorrection=ctCorrection)
+                                                   ctTemplate=ctTemplate, ctCorrection=ctCorrection,
+                                                   petImage=self.normImage(picked=True))
         except Exception as error:
             logging.exception("Neuro: normalization failed")
             slicer.util.errorDisplay(f"Normalization failed:\n{error}")
@@ -2747,6 +2824,48 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                                + "\nCheck it in the views, correct it by hand if needed, then Harden.")
         self._updateNormButtons()
 
+    def normImage(self, picked=False):
+        """The PET image registered to the template: the one picked on the page (on the series), else (None with
+        picked) the series' reference image (its summed image)."""
+        node = self.node("NormImage") if self.NORM_IMAGE_CHOICE else None
+        if node is not None or picked:
+            return node
+        sequence = self.sequence()
+        return self.logic.referenceImage(sequence) if sequence is not None else None
+
+    def _syncNormImage(self):
+        """The selector shows the image kept in the parameter node (e.g. after a scene load)."""
+        node = self.node("NormImage")
+        if self.normImageSelector.currentNode() is not node:
+            self.normImageSelector.blockSignals(True)
+            self.normImageSelector.setCurrentNode(node)
+            self.normImageSelector.blockSignals(False)
+
+    def onNormImageChanged(self, node):
+        if self.node("NormImage") is node:
+            return
+        self.setNode("NormImage", node)
+        self._clearNormalization()
+        if self.current == STEP_NORM:
+            self._showNormInput()
+
+    def _showNormInput(self):
+        """Before a normalization: the image that will be registered in four-up, over the CT/MR when there is one."""
+        if not self.NORM_IMAGE_CHOICE or self.normResult is not None or self.normSession is not None:
+            return
+        image, anatomy = self.normImage(), self.anatomy()
+        if image is None:
+            return
+        try:
+            slicer.app.layoutManager().setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
+            if anatomy is not None:
+                slicer.util.setSliceViewerLayers(background=anatomy, foreground=image, foregroundOpacity=0.5,
+                                                 label=None, fit=True)
+            else:
+                slicer.util.setSliceViewerLayers(background=image, foreground=None, label=None, fit=True)
+        except Exception:
+            logging.debug("Neuro: could not show the image to normalize", exc_info=True)
+
     def _openNormSession(self):
         """The registration layout (PET / fusion / template, checkerboard) with the normalization chain on the PET.
         With the CT/MR method the PET is shown too: it lies on the CT/MR, so the same chain moves it."""
@@ -2765,7 +2884,7 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             session = RegistrationSession(self.normResult["template"])
             session.fusionOpacity = self.normOpacity.value
             session.showCheckerboard = self.normCheckerCheck.checked
-            session.open(self.logic.referenceImage(sequence))
+            session.open(self.normImage())
             session.setRegistration(self.normResult["linear"], self.normResult["bspline"])
             session.setFixedWindow(*_percentiles(self.normResult["template"]))
             if self._isPetTemplate(self.normResult["template"]):
@@ -3175,6 +3294,7 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.setNode("Segmentation", segmentation)
         self.regionsTargetSelector.setCurrentNode(segmentation)
         self._parameter().SetParameter(NEURO_PREFIX + "ReferenceSegment", referenceId or "")
+        self._regionsVersion = getattr(self, "_regionsVersion", 0) + 1     # Modeling takes its reference again
         count = len(self.logic.segmentIds(segmentation))
         reference = segmentation.GetSegmentation().GetSegment(referenceId).GetName() if referenceId else None
         self.regionsLabel.text = (f"'{segmentation.GetName()}': {count} segments"
@@ -3257,6 +3377,9 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._closeNormSession()
         elif key == STEP_NORM and method == "enter" and self.normResult is not None:
             self._openNormSession()
+        elif key == STEP_NORM and method == "enter":
+            self._syncNormImage()
+            self._showNormInput()
 
     def _takeSeriesFrom(self, key):
         """The series the embedded module ended with (e.g. a new series saved separately) is the workflow's."""
@@ -3295,11 +3418,21 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if segmentation is None:
             return
         fresh = widget.segmentationSelector.currentNode() is not segmentation
+        # new regions (also loaded into the same segmentation: new segment IDs, Modeling guesses its reference
+        # again) or another reference: the workflow's reference and target set again; else Modeling keeps the ones
+        # picked there
+        stamp = (segmentation.GetID(), self._parameter().GetParameter(NEURO_PREFIX + "ReferenceSegment"),
+                 getattr(self, "_regionsVersion", 0))
+        renewed = fresh or stamp != getattr(self, "_modelingStamp", None)
+        self._modelingStamp = stamp
         if fresh:
             index = widget.modelCombo.findData(DEFAULT_MODEL)
             if index >= 0:
                 widget.modelCombo.setCurrentIndex(index)
             widget.segmentationSelector.setCurrentNode(segmentation)
+        if renewed:
+            if not fresh:
+                widget._fillSegmentCombos()     # the segments of the new regions now (not after Modeling's timer)
             referenceId = self._parameter().GetParameter(NEURO_PREFIX + "ReferenceSegment")
             index = widget.referenceCombo.findData(referenceId) if referenceId else -1
             if index >= 0:
@@ -3496,12 +3629,22 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 return
             widget = widget.parentWidget()
 
+    def _anatomyMethodFits(self):
+        """Whether the CT/MR method is the default: the patient has an MR, or a CT and the normal database picked has
+        a mean CT to register it to. Else the PET is registered to the synthetic PET (a CT to the MR template fits
+        badly)."""
+        if self.anatomy() is None:
+            return False
+        if not self._anatomyIsCt():
+            return True
+        return normaldb.databaseTemplateKey("CT") in self._databaseTemplates()[0]
+
     def _defaultMethod(self):
-        """Normalize with the patient's CT/MR when the study has one (else the PET), until the method is picked by
-        hand; a pending normalization is not touched."""
+        """Normalize with the patient's CT/MR when it fits (_anatomyMethodFits), else the PET (to the synthetic PET),
+        until the method is picked by hand; a pending normalization is not touched."""
         if getattr(self, "_methodChosen", False) or not hasattr(self, "methodCombo") or self.normResult is not None:
             return
-        wanted = METHOD_ANATOMY if self.anatomy() is not None else METHOD_PET
+        wanted = METHOD_ANATOMY if self._anatomyMethodFits() else METHOD_PET
         if self.methodCombo.currentData != wanted:
             self.methodCombo.setCurrentIndex(self.methodCombo.findData(wanted))
 

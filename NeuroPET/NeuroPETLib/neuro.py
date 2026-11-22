@@ -53,8 +53,25 @@ TEMPLATES = (   # key, title, file name stem in a space folder
     ("CSF", "CSF probability", "CSF"),
     # made on first use from the grey and white matter maps (pseudoPetArray), saved next to them
     ("pseudoPET", "Synthetic PET (GM + 0.3 WM, smoothed)", "pseudoPET"),
+    # made on first use from the grey / white matter maps and the CerebrA labels (pseudoDopaArray)
+    ("pseudoPETDopa", "Synthetic dopaminergic PET (striatum 1, thalamus / pallidum 0.35, GM 0.35, WM 0.1)",
+     "pseudoPETDopa"),
 )
 PSEUDO_PET = "pseudoPET"
+PSEUDO_DOPA = "pseudoPETDopa"
+# the synthetic dopaminergic PET: CerebrA structures (name without the side, lower case, a word of it) and their
+# value; the rest GM x DOPA_GM_WEIGHT + WM x DOPA_WM_WEIGHT; ventricles 0. GM and thalamus a bit higher than the
+# specific binding alone: a summed dynamic image carries the early (perfusion) frames too
+DOPA_STRUCTURE_WEIGHTS = (("caudate", 1.0), ("putamen", 1.0), ("accumbens", 1.0), ("thalamus", 0.35),
+                          ("pallidum", 0.35), ("ventricle", 0.0))
+DOPA_GM_WEIGHT = 0.35
+DOPA_WM_WEIGHT = 0.1
+
+
+def dopaSettings():
+    """The values the synthetic dopaminergic PET is made with (kept next to it: a change makes it again)."""
+    return {"structures": [list(w) for w in DOPA_STRUCTURE_WEIGHTS], "gm": DOPA_GM_WEIGHT, "wm": DOPA_WM_WEIGHT,
+            "fwhmMm": PSEUDO_PET_FWHM_MM}
 PSEUDO_PET_WM_WEIGHT = 0.3      # FDG: white matter uptake about a third of the grey matter's
 PSEUDO_PET_FWHM_MM = 6.0        # smoothed to a PET resolution
 DEFAULT_TEMPLATE = "T1"
@@ -62,13 +79,13 @@ BRAIN_MASK = "mask"
 CT_TEMPLATE = "ctTemplate"      # a CT template in the space: a patient's CT is registered to it (CT to CT)
 CT_TEMPLATE_GM = "ctTemplateGm" # the grey matter map in the CT template's space (its MNI is not quite the space's)
 CT_CORRECTION_SUFFIX = "_to_space.json"     # the CT template to space matrix, cached next to the CT template
-SPACE_VOLUMES = tuple((key, stem) for key, _, stem in TEMPLATES if key != PSEUDO_PET) + (
+SPACE_VOLUMES = tuple((key, stem) for key, _, stem in TEMPLATES if key not in (PSEUDO_PET, PSEUDO_DOPA)) + (
     (BRAIN_MASK, "mask"), (CT_TEMPLATE, "CT"), (CT_TEMPLATE_GM, "CT_GM"))
-GENERATED = (PSEUDO_PET,)       # made by the workflows
+GENERATED = (PSEUDO_PET, PSEUDO_DOPA)       # made by the workflows (synthetic PET templates)
 IMAGE_EXTENSIONS = (".seg.nrrd", ".nrrd", ".nii.gz", ".nii", ".mnc")     # read; the files made are .nrrd (the standard)
 REQUIRED = (DEFAULT_TEMPLATE,)  # without these the normalization cannot run
 # Volumes of a space a normalization method registers to (normalizationTemplates)
-TEMPLATES_PET = ("T1", "T2", "PD", "GM", PSEUDO_PET)       # the PET to an MR template / a synthetic PET
+TEMPLATES_PET = ("T1", "T2", "PD", "GM", PSEUDO_PET, PSEUDO_DOPA)     # the PET to an MR template / a synthetic PET
 TEMPLATES_MR = ("T1", "T2", "PD")                          # an MR to an MR template
 TEMPLATES_CT = (CT_TEMPLATE,)                              # a CT to a CT template
 
@@ -246,9 +263,10 @@ def atlasFiles(space=None):
     if not info:
         return {}
     found = dict(info["files"])
-    path = pseudoPetPath(found)
-    if path and os.path.isfile(path):
-        found[PSEUDO_PET] = path
+    for key in GENERATED:
+        path = pseudoPetPath(found, key)
+        if path and os.path.isfile(path):
+            found[key] = path
     return found
 
 
@@ -290,20 +308,20 @@ def ctCorrectedPath(found):
     return path[:-len(".json")] + ".nrrd" if path else None
 
 
-def pseudoPetPath(found):
-    """Where the synthetic PET template is: the file found, else next to the grey matter map; None without the grey
-    and white matter maps."""
-    if PSEUDO_PET in found:
-        return found[PSEUDO_PET]
+def pseudoPetPath(found, key=PSEUDO_PET):
+    """Where a synthetic PET template (GENERATED: the FDG-like one, the dopaminergic one) is: the file found, else
+    next to the grey matter map; None without the grey and white matter maps."""
+    if key in found:
+        return found[key]
     if "GM" not in found or "WM" not in found:
         return None
-    stem = next(s for k, _, s in TEMPLATES if k == PSEUDO_PET)
+    stem = next(s for k, _, s in TEMPLATES if k == key)
     return os.path.join(outputFolder(found["GM"]), stem + ".nrrd")
 
 
 def canMakeTemplate(found, key):
-    """Whether the template key can be used: its file is there, or (the synthetic PET) it can be made."""
-    return key in found or (key == PSEUDO_PET and pseudoPetPath(found) is not None)
+    """Whether the template key can be used: its file is there, or (a synthetic PET) it can be made."""
+    return key in found or (key in GENERATED and pseudoPetPath(found, key) is not None)
 
 
 def _probability(array):
@@ -319,6 +337,63 @@ def pseudoPetArray(gm, wm, spacing=(1.0, 1.0, 1.0), wmWeight=PSEUDO_PET_WM_WEIGH
     if gm.shape != wm.shape:
         raise ValueError("The grey and white matter maps are not on the same grid.")
     image = gm + float(wmWeight) * wm
+    if fwhmMm > 0:
+        from scipy import ndimage
+        sigma = [fwhmMm / 2.3548 / float(s) for s in spacing]
+        image = ndimage.gaussian_filter(image, sigma)
+    top = float(image.max()) if image.size else 0.0
+    return (image / top if top > 0 else image).astype(np.float32)
+
+
+def dopaWeight(name):
+    """The value of a CerebrA structure in the synthetic dopaminergic PET (DOPA_STRUCTURE_WEIGHTS), None for the
+    others ('Caudate R' 1.0, 'Lateral Ventricle L' 0.0, 'Insula R' None)."""
+    base = re.sub(r"\s+[rl]$", "", str(name or "").strip().lower())
+    return next((w for word, w in DOPA_STRUCTURE_WEIGHTS if word in base), None)
+
+
+def resampleLabelsNearest(labels, sourceIjkToRas, shape, targetIjkToRas):
+    """A label array (k, j, i; IJK to RAS sourceIjkToRas) on another grid (shape k j i, targetIjkToRas), nearest
+    neighbour, 0 outside; the array itself when the grids are the same."""
+    labels = np.asarray(labels)
+    source, target = np.asarray(sourceIjkToRas, dtype=float), np.asarray(targetIjkToRas, dtype=float)
+    if labels.shape == tuple(shape) and np.allclose(source, target, atol=1e-4):
+        return labels
+    matrix = np.linalg.inv(source) @ target
+    out = np.zeros(tuple(shape), dtype=labels.dtype)
+    j, i = np.mgrid[0:shape[1], 0:shape[2]]
+    for k in range(shape[0]):
+        points = np.stack([i.ravel(), j.ravel(), np.full(i.size, k), np.ones(i.size)])
+        si, sj, sk = (np.rint(matrix[:3] @ points)).astype(np.int64)
+        inside = ((si >= 0) & (si < labels.shape[2]) & (sj >= 0) & (sj < labels.shape[1]) & (sk >= 0)
+                  & (sk < labels.shape[0]))
+        values = np.zeros(i.size, dtype=labels.dtype)
+        values[inside] = labels[sk[inside], sj[inside], si[inside]]
+        out[k] = values.reshape(i.shape)
+    return out
+
+
+def pseudoDopaArray(gm, wm, labels, entries, spacing=(1.0, 1.0, 1.0), gmWeight=DOPA_GM_WEIGHT,
+                    wmWeight=DOPA_WM_WEIGHT, fwhmMm=PSEUDO_PET_FWHM_MM):
+    """A synthetic dopaminergic PET (FDOPA / DAT / D2 like) from the grey and white matter probability maps and the
+    CerebrA labels (all on one grid; entries [(label value, name, color)] of the labels): GM x gmWeight + WM x
+    wmWeight, the structures of DOPA_STRUCTURE_WEIGHTS set to their value (striatum 1, thalamus / pallidum 0.3,
+    ventricles 0), smoothed with a Gaussian of fwhmMm, scaled to a maximum of 1."""
+    gm, wm = _probability(gm), _probability(wm)
+    labels = np.asarray(labels)
+    if gm.shape != wm.shape or gm.shape != labels.shape:
+        raise ValueError("The grey / white matter maps and the labels are not on the same grid.")
+    image = float(gmWeight) * gm + float(wmWeight) * wm
+    found = []
+    for value, name, _ in entries:
+        weight = dopaWeight(name)
+        if weight is not None:
+            voxels = labels == value
+            if voxels.any():
+                image[voxels] = weight
+                found.append(name)
+    if not any(dopaWeight(n) == 1.0 for n in found):
+        raise ValueError("No caudate / putamen / accumbens in the labels.")
     if fwhmMm > 0:
         from scipy import ndimage
         sigma = [fwhmMm / 2.3548 / float(s) for s in spacing]

@@ -45,8 +45,8 @@ class BatchTemplates:
                                  "(compute its mean / SD maps or build its template).")
             return path
         path = self.atlas.get(key)
-        if not path and key == neuro.PSEUDO_PET and neuro.canMakeTemplate(self.atlas, key):
-            path = self.logic.ensurePseudoPet(self.atlas)
+        if not path and key in neuro.GENERATED and neuro.canMakeTemplate(self.atlas, key):
+            path = self.logic.ensureSyntheticPet(self.atlas, key)
         if not path:
             raise ValueError(f"The template '{neuro.templateTitle(key)}' is not in the database's space "
                              f"({self.spaceName}).")
@@ -59,7 +59,7 @@ class BatchTemplates:
             name = f"{self.header['name']} {volume}" if volume else f"{self.spaceName} {key}"
             node = self.logic.loadAtlasVolume(self.path(key), name=name)
             node.SetAttribute(TEMPLATE_KEY_ATTRIBUTE, key)
-            if key in (neuro.PSEUDO_PET, normaldb.DB_PET):
+            if key in neuro.GENERATED or key == normaldb.DB_PET:
                 node.SetAttribute(PET_TEMPLATE_ATTRIBUTE, "1")
             self._nodes[key] = node
         return self._nodes[key]
@@ -332,8 +332,8 @@ class BatchLogicMixin:
             settings.update(steps=steps, resample=list(settings.get("resample") or [True] * len(steps))[:len(steps)])
         key = plan["template"]
         templatePath = atlas.get(key)
-        if not templatePath and key == neuro.PSEUDO_PET and neuro.canMakeTemplate(atlas, key):
-            templatePath = self.ensurePseudoPet(atlas)
+        if not templatePath and key in neuro.GENERATED and neuro.canMakeTemplate(atlas, key):
+            templatePath = self.ensureSyntheticPet(atlas, key)
         if not templatePath:
             raise ValueError(f"The template '{key}' (pass 0) is not in the database's space "
                              f"({neuro.spaceTitle(header.get('space'))}).")
