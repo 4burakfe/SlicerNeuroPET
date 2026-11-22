@@ -291,6 +291,8 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
         subjects = normaldb.readSubjects(folder)
         if len(subjects) < 2:
             raise ValueError("The mean / SD maps need at least two subjects.")
+        if normaldb.isDynamic(header):
+            return self._computeDynamicStatistics(folder, header, subjects, progress)
         mapKey = normaldb.subjectMapKey(header)
         groups = normaldb.statisticsGroups(header, subjects)
         notes = [f"Age group '{g['name']}': {len(g['ids'])} subject(s), no mean / SD maps (2 needed)."
@@ -315,7 +317,7 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
                                                                            f"{len(subjects)})"):
                 self._dropPendingRegions(folder)
                 return None, ["Stopped: nothing written."]
-            relative = subject.get(mapKey)
+            relative = normaldb.subjectMapFile(subject, mapKey)
             path = os.path.join(folder, relative) if relative else ""
             if not path or not os.path.isfile(path):
                 raise ValueError(f"Subject '{subject['id']}' has no {mapKey[:-4].upper()} map ({relative}).")
@@ -430,6 +432,195 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
         normaldb.writeHeader(folder, header)
         self.forgetLoaded(folder)
         return header, notes
+
+    def _computeDynamicStatistics(self, folder, header, subjects, progress=None):
+        """computeStatistics of a dynamic database: for each map of its model (normaldb.kinetics maps) the groups'
+        mean / SD maps (stats/<group>_<map>_mean / _sd), the regional statistics of the regions' TAC fit values and
+        of the voxel map means (stats/regions_<map>_tac / _voxel.json) and the normals' surface projections
+        (stats/ssp_<map>.npz). The groups' own "mean" / "sd" and the statistics' "regions" / "ssp" are the primary
+        map's (TAC fit values); normaldb.mapHeader gives the others."""
+        settings = normaldb.kinetics(header)
+        maps = list(settings["maps"])
+        primary = settings["primaryMap"] if settings["primaryMap"] in maps else maps[0]
+        groups = normaldb.statisticsGroups(header, subjects)
+        notes = [f"Age group '{g['name']}': {len(g['ids'])} subject(s), no mean / SD maps (2 needed)."
+                 for k, g in groups.items() if k != normaldb.MASTER and len(g["ids"]) < 2]
+        groups = {k: g for k, g in groups.items() if len(g["ids"]) >= 2}
+        membership = {}
+        for key, group in groups.items():
+            for subjectId in group["ids"]:
+                membership.setdefault(subjectId, []).append(key)
+        fwhm = float(header.get("smoothingFwhmMm") or 0)
+        masks, surface, regionNote = self._regionMasks(folder, header)
+        if regionNote:
+            notes.append(regionNote)
+        brain = nr.unionMask(masks, next(iter(masks.values())).shape) if masks and surface is not None else None
+        accumulators = {m: {k: normaldb.RunningStatistics() for k in groups} for m in maps}
+        sspAccumulators = ({m: {k: normaldb.RunningStatistics() for k in groups} for m in maps}
+                           if surface is not None else None)
+        voxelValues = {m: {} for m in maps}         # {map: {subject: {region: voxel mean}}}
+        tacValues = {m: {} for m in maps}           # {map: {subject: {region: TAC fit value}}}
+        noFits = []
+        geometry = None
+        for index, subject in enumerate(subjects):
+            if progress is not None and not progress(index, len(subjects), f"{subject['id']} ({index + 1} / "
+                                                                           f"{len(subjects)})"):
+                self._dropPendingRegions(folder)
+                return None, ["Stopped: nothing written."]
+            fits = normaldb.readFits(folder, subject)
+            if fits is None:
+                noFits.append(subject["id"])
+            for mapName in maps:
+                found = normaldb.fitValues(fits, mapName)
+                if found:
+                    tacValues[mapName][subject["id"]] = found
+            files = normaldb.subjectMapFiles(subject)
+            for mapName in maps:
+                relative = files.get(mapName)
+                path = os.path.join(folder, relative) if relative else ""
+                if not path or not os.path.isfile(path):
+                    raise ValueError(f"Subject '{subject['id']}' has no {mapName} map ({relative or 'none'}).")
+                node = slicer.util.loadVolume(path, {"show": False})
+                if node is None:
+                    raise ValueError(f"Could not load {path}")
+                try:
+                    if geometry is None:
+                        geometry = vtk.vtkMatrix4x4()
+                        node.GetIJKToRASMatrix(geometry)
+                    array = slicer.util.arrayFromVolume(node)
+                    if masks:
+                        try:
+                            voxelValues[mapName][subject["id"]] = nr.regionMeans(array, masks)
+                        except ValueError as error:
+                            notes.append(f"No regional statistics of the voxel maps: {error}")
+                            masks = None
+                    smoothed = normaldb.smoothMap(array, fwhm, tuple(float(x) for x in node.GetSpacing())[::-1])
+                    for key in membership.get(subject["id"], []):
+                        accumulators[mapName][key].add(smoothed)
+                    if sspAccumulators is not None:
+                        if brain is not None and brain.shape != smoothed.shape:
+                            notes.append(f"No 3D-SSP projections: subject '{subject['id']}' is not on the grid of "
+                                         "the regions.")
+                            sspAccumulators = None
+                        else:
+                            projected = ssp.project(smoothed, _ijkToRasOf(node), surface["points"],
+                                                    surface["normals"], mask=brain)
+                            for key in membership.get(subject["id"], []):
+                                sspAccumulators[mapName][key].add(projected)
+                finally:
+                    slicer.mrmlScene.RemoveNode(node)
+        if noFits:
+            notes.append("No region fits (TAC fit values) of: " + ", ".join(noFits[:10])
+                         + (f" and {len(noFits) - 10} more" if len(noFits) > 10 else "") + ".")
+        # written beside the old files first (see computeStatistics)
+        output = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "normal database map")
+        written, pendingFiles = {}, []
+        try:
+            output.SetIJKToRASMatrix(geometry)
+            for key, group in groups.items():
+                entry = {"name": group["name"], "n": accumulators[primary][key].n, "maps": {},
+                         "ages": normaldb.ageSummary(s.get("age") for s in subjects if s["id"] in set(group["ids"]))}
+                for mapName in maps:
+                    files = {}
+                    for which in ("mean", "sd"):
+                        running = accumulators[mapName][key]
+                        relative = normaldb.mapStatsFileName(key, mapName, which)
+                        pending = normaldb.mapStatsFileName(key, mapName, which, ".pending.nii.gz")
+                        slicer.util.updateVolumeFromArray(output, running.mean() if which == "mean" else running.sd())
+                        if not slicer.util.saveNode(output, os.path.join(folder, pending)):
+                            raise ValueError(f"Could not write {relative}")
+                        pendingFiles.append((pending, relative))
+                        files[which] = relative
+                    entry["maps"][mapName] = files
+                entry.update(entry["maps"][primary])         # the primary map's as the group's own mean / SD
+                written[key] = entry
+        except Exception:
+            for pending, _ in pendingFiles:
+                if os.path.isfile(os.path.join(folder, pending)):
+                    os.remove(os.path.join(folder, pending))
+            raise
+        finally:
+            slicer.mrmlScene.RemoveNode(output)
+        old = header.get("statistics") or {}
+        if old.get("computed") and not old.get("stale"):
+            normaldb.writeHeader(folder, dict(header, statistics=dict(old, stale=True)), touch=False)
+        for pending, relative in pendingFiles:
+            os.replace(os.path.join(folder, pending), os.path.join(folder, relative))
+        if old.get("computed"):
+            header["version"] = int(header.get("version") or 1) + 1
+        version = header.get("version", 1)
+        regionSettings = {k: v for k, v in sn.regionSettings(folder, header).items() if k != "referenceMaskPath"}
+        perMap = {}
+        for mapName in maps:
+            view = normaldb.mapHeader(header, mapName)
+            item = {"regions": {}}
+            for how, values in ((normaldb.REGION_TAC_FIT, tacValues[mapName]),
+                                (normaldb.REGION_VOXEL_MEAN, voxelValues[mapName] if masks else {})):
+                if not values:
+                    continue
+                relative = normaldb.mapRegionsFileName(mapName, how)
+                key = normaldb.regionValuesKey(dict(view, regionValues=how))
+                signature = nr.masksSignature(masks) if masks else ""
+                nr.writeJson(os.path.join(folder, relative), nr.regionsDocument(
+                    nr.regionStatistics(values, groups), key, version, regionSettings, signature))
+                item["regions"][how] = relative
+            if sspAccumulators is not None:
+                sspGroups = {k: {"mean": a.mean(), "sd": a.sd(), "n": a.n, "name": groups[k]["name"]}
+                             for k, a in sspAccumulators[mapName].items() if a.n >= 2}
+                relative = normaldb.mapSspFileName(mapName)
+                ssp.write(os.path.join(folder, relative), surface, sspGroups, {
+                    "depthMm": ssp.DEPTH_MM, "stepMm": ssp.STEP_MM, "clipToBrain": True,
+                    "surface": ssp.SURFACE_VERSION, "fwhmMm": fwhm, "maps": normaldb.subjectMapKey(view),
+                    "version": version})
+                item["ssp"] = relative
+            perMap[mapName] = item
+        header["statistics"] = {"computed": normaldb.now(), "stale": False, "groups": written,
+                                "smoothingFwhmMm": fwhm, "maps": normaldb.MAP_KEY_PREFIX + "*", "mapStatistics": perMap,
+                                "primaryMap": primary,
+                                "regions": (perMap[primary]["regions"] or {}).get(normaldb.REGION_TAC_FIT),
+                                "ssp": perMap[primary].get("ssp")}
+        # the files of the old statistics not written again go
+        keep = {relative for _, relative in pendingFiles}
+        keep.update(r for item in perMap.values() for r in item["regions"].values())
+        keep.update(item["ssp"] for item in perMap.values() if item.get("ssp"))
+        for relative in self._statisticsFiles(old):
+            if relative not in keep and os.path.isfile(os.path.join(folder, relative)):
+                os.remove(os.path.join(folder, relative))
+        pending = os.path.join(folder, nr.REGIONS_SEGMENTATION_PENDING)
+        stored = os.path.join(folder, nr.REGIONS_SEGMENTATION_FILE)
+        if masks and os.path.isfile(pending):
+            os.replace(pending, stored)
+            header["statistics"]["regionsSegmentation"] = nr.REGIONS_SEGMENTATION_FILE
+            header["statistics"]["regionsReference"] = getattr(self, "_regionsReference", None) or ""
+        else:
+            self._dropPendingRegions(folder)
+            if os.path.isfile(stored):
+                os.remove(stored)
+        header["subjectAges"] = normaldb.ageSummary(s.get("age") for s in subjects)
+        normaldb.writeHeader(folder, header)
+        self.forgetLoaded(folder)
+        return header, notes
+
+    @staticmethod
+    def _statisticsFiles(statistics):
+        """The relative files of a header's statistics (groups' mean / SD, each map's, regions, surface
+        projections)."""
+        out = set()
+        statistics = statistics or {}
+        for group in (statistics.get("groups") or {}).values():
+            for which in ("mean", "sd"):
+                if group.get(which):
+                    out.add(group[which])
+            for entry in (group.get("maps") or {}).values():
+                out.update(v for k, v in entry.items() if k in ("mean", "sd") and v)
+        for item in (statistics.get("mapStatistics") or {}).values():
+            out.update(v for v in (item.get("regions") or {}).values() if v)
+            if item.get("ssp"):
+                out.add(item["ssp"])
+        for key in ("regions", "ssp"):
+            if statistics.get(key):
+                out.add(statistics[key])
+        return out
 
     @staticmethod
     def _writeAnatomyMeans(folder, header, subjects, old=None):
@@ -1463,11 +1654,10 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         layout.addLayout(grid)
         # not (yet) for dynamic databases: shown under the Static tab only
         self.staticOnlyButtons = (self.predefinedButton, self.downloadButton, self.exportButton,
-                                  self.addSubjectsButton, self.normalizeAgainButton, self.buildTemplateButton,
-                                  self.statsButton, self.removeSubjectsButton)
-        self.dynamicNote = qt.QLabel("Dynamic databases: create, edit, delete. Adding subjects (BIDS series and from "
-                                     "the Dynamic Neuro workflow), the mean / SD maps and the predefined databases "
-                                     "come next.")
+                                  self.addSubjectsButton, self.normalizeAgainButton, self.buildTemplateButton)
+        self.dynamicNote = qt.QLabel("Dynamic databases: subjects are added from the Review/Compare step of the "
+                                     "Dynamic Neuro workflow. Adding BIDS series here, the template and the predefined "
+                                     "databases come next.")
         self.dynamicNote.wordWrap = True
         self.dynamicNote.visible = False
         layout.addWidget(self.dynamicNote)
@@ -1621,6 +1811,9 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         groups = ((header.get("statistics") or {}).get("groups") or {})
         if groups:
             rows.append(("Mean / SD", "; ".join(f"{g.get('name', k)}: n={g.get('n')}" for k, g in groups.items())))
+            if normaldb.isDynamic(header) and normaldb.statisticsMaps(header):
+                rows.append(("Maps compared", ", ".join(normaldb.statisticsMaps(header))
+                             + " (regional values: TAC fits and voxel map means)"))
             rows.append(("Regional statistics", "yes (stats/regions.json)" if nr.regionsPath(folder, header) else
                          "no (computed with the mean / SD when the CerebrA is in the atlas folder)"))
             rows.append(("3D-SSP projections", "yes (stats/ssp.npz)" if ssp.sspPath(folder, header) else "no"))
@@ -1920,9 +2113,12 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
             return
         count = normaldb.subjectCount(folder, header)
         fwhm = float(header.get("smoothingFwhmMm") or 0)
+        if normaldb.isDynamic(header):
+            maps = ", ".join(normaldb.kinetics(header)["maps"]) + " maps and their regional TAC fit values"
+        else:
+            maps = f"{normaldb.subjectMapKey(header)[:-4].upper()} maps"
         if not slicer.util.confirmOkCancelDisplay(
-                f"Compute the mean / SD maps of '{header.get('name')}' from its {count} subject(s) ("
-                f"{normaldb.subjectMapKey(header)[:-4].upper()} maps, smoothing "
+                f"Compute the mean / SD maps of '{header.get('name')}' from its {count} subject(s) ({maps}, smoothing "
                 + (f"{fwhm:g} mm FWHM" if fwhm > 0 else "off") + ")?", windowTitle="Compute mean / SD"):
             return
         progressDialog = slicer.util.createProgressDialog(windowTitle="Compute mean / SD", labelText="Starting...",
@@ -2492,7 +2688,8 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         listWidget.setSelectionMode(qt.QAbstractItemView.ExtendedSelection)
         for subject in subjects:
             text = (f"{subject.get('id')}  (age {subject.get('age') or '?'}, {subject.get('sex') or '?'}, "
-                    f"reference mean {subject.get('referenceMean') or '?'})")
+                    + ("reference k2' " if normaldb.isDynamic(header) else "reference mean ")
+                    + f"{subject.get('referenceMean') or '?'})")
             item = qt.QListWidgetItem(text)
             item.setData(qt.Qt.UserRole, subject.get("id"))
             listWidget.addItem(item)

@@ -87,3 +87,56 @@ def test_default_map_and_titles():
     assert dn.regionValueTitle("BPnd", dn.REGION_TAC_FIT) == "BPnd (TAC fit)"
     assert dn.regionValueTitle("R1", dn.REGION_VOXEL_MEAN) == "R1 mean"
     assert set(dn.COMPARE_MODELS) == set(normaldb.KINETIC_MAPS)
+
+
+def dynamicHeader(**statistics):
+    header = normaldb.newHeader("D", normaldb.DYNAMIC)
+    header["statistics"].update(statistics)
+    return header
+
+
+def test_dynamic_subject_files_and_keys():
+    header = dynamicHeader()
+    assert normaldb.isDynamic(header) and not normaldb.isRatioMap(header)
+    assert normaldb.subjectMapKey(header) == "map_BPnd"           # the primary map of SRTM2
+    subject = {"id": "s1", "mapFiles": json.dumps({"BPnd": "subjects/s1/s1_BPnd.nii.gz"}), "suvrFile": "x"}
+    assert normaldb.subjectMapFile(subject, "map_BPnd") == "subjects/s1/s1_BPnd.nii.gz"
+    assert normaldb.subjectMapFile(subject, "map_R1") == "" and normaldb.subjectMapFile(subject, "suvrFile") == "x"
+    assert normaldb.subjectMapFiles({"mapFiles": "not json"}) == {}
+    assert normaldb.mapFileName("s1", "BPnd") == "subjects/s1/s1_BPnd.nii.gz"
+    static = normaldb.newHeader("S")
+    assert normaldb.isRatioMap(static) and normaldb.regionValuesKey(static) == "suvrFile"
+    assert "fitsFile" in normaldb.SUBJECT_COLUMNS and "mapFiles" in normaldb.SUBJECT_COLUMNS
+
+
+def test_map_header_is_one_map_of_the_database():
+    groups = {"master": {"name": "Master", "n": 3, "mean": "stats/master_BPnd_mean.nii.gz",
+                         "sd": "stats/master_BPnd_sd.nii.gz",
+                         "maps": {m: {"mean": f"stats/master_{m}_mean.nii.gz", "sd": f"stats/master_{m}_sd.nii.gz"}
+                                  for m in ("BPnd", "R1", "k2")}},
+              "old": {"name": "Old", "n": 2, "maps": {"BPnd": {"mean": "a", "sd": "b"}}}}
+    perMap = {"R1": {"regions": {"tac": "stats/regions_R1_tac.json", "voxel": "stats/regions_R1_voxel.json"},
+                     "ssp": "stats/ssp_R1.npz"}}
+    header = dynamicHeader(groups=groups, mapStatistics=perMap)
+    assert normaldb.statisticsMaps(header) == ["BPnd", "R1", "k2"]
+    view = normaldb.mapHeader(header, "R1", normaldb.REGION_VOXEL_MEAN)
+    assert view["statistics"]["groups"]["master"]["mean"] == "stats/master_R1_mean.nii.gz"
+    assert "old" not in view["statistics"]["groups"]                  # no R1 maps there
+    assert view["statistics"]["regions"] == "stats/regions_R1_voxel.json"
+    assert view["statistics"]["ssp"] == "stats/ssp_R1.npz"
+    assert view["mapType"] == "R1" and not normaldb.isRatioMap(view)
+    assert normaldb.subjectMapKey(view) == "map_R1" and normaldb.regionValuesKey(view) == "map_R1_voxel"
+    assert header["statistics"]["groups"]["master"]["mean"].endswith("BPnd_mean.nii.gz")     # not changed
+    suvr = normaldb.mapHeader(dynamicHeader(), "SUVR")
+    assert not normaldb.isRatioMap(suvr)                                # never divided by the reference again
+
+
+def test_fit_values(tmp_path):
+    folder = str(tmp_path)
+    os.makedirs(os.path.join(folder, "subjects", "s1"))
+    with open(os.path.join(folder, "subjects", "s1", "s1_fits.json"), "w") as stream:
+        json.dump({"regions": {"Putamen L": {"BPnd": 2.5, "R1": None}, "Caudate L": {"BPnd": "nan"}}}, stream)
+    document = normaldb.readFits(folder, {"fitsFile": "subjects/s1/s1_fits.json"})
+    assert normaldb.fitValues(document, "BPnd") == {"Putamen L": 2.5}
+    assert normaldb.fitValues(document, "R1") == {}
+    assert normaldb.readFits(folder, {"fitsFile": "subjects/s1/none.json"}) is None

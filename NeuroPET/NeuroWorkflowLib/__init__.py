@@ -7,7 +7,8 @@ NeuroWorkflowLib: the step-by-step workflow shared by the Neuro modules (Slicer 
                 workflow opened again on its step when a saved scene is loaded
     database    the normal database: folder and list, the pick on the Normalization page, the Regions page locked
                 to its region settings, the regions step views
-    compare     the Dynamic Neuro Compare step: the parametric maps in the Static Neuro review
+    compare     the Dynamic Neuro Review/Compare step: the parametric maps in the Static Neuro review
+    dynamicdb   a patient's parametric maps and region fits added to a dynamic normal database
 
 Pure numpy code that can be tested without Slicer stays in NeuroPETLib.
 """
@@ -17,7 +18,7 @@ from NeuroPETLib import requireBaseExtension
 requireBaseExtension()     # PET4D (DICOMGatedDynamicPETLib) importable before any file here is imported
 
 # in reload order (a file before the files that import it)
-MODULES = ("scenestate", "base", "database", "compare")
+MODULES = ("scenestate", "base", "database", "compare", "dynamicdb")
 
 
 def reloadModules():

@@ -8,8 +8,13 @@ as the review's image).
                 settings (asked first); a map of the set is picked to compare (the model's primary map first)
     regions     the regional value of a region: its TAC fitted with the model (default; the Modeling logic's region
                 fits, the same as the Modeling step's) or the mean of the voxel map in it
-    database    a dynamic normal database's comparison needs its mean / SD maps per map (later); its kinetic
-                settings are compared with the Modeling step's here (warnings, the comparison still runs)
+    database    a dynamic normal database's mean / SD maps of the map picked (normaldb.mapHeader): the voxel scores
+                of the map as it is (not divided by the reference again), the regional scores of the TAC fit values
+                or of the voxel means (the database's of the same kind); its kinetic settings are compared with the
+                Modeling step's here (warnings, the comparison still runs)
+    adding      the patient (every map of the database's model, the summed image, the regions' TAC fits) added to a
+                user defined dynamic database (NeuroWorkflowLib.dynamicdb): only with the database's kinetic
+                settings and reference region
 
 The mixin is put before the review mixins (StaticNeuroPETLib.review_*) in DynamicNeuroPETWidget; the page is the
 review page with the 'Parametric maps' box on top.
@@ -23,7 +28,7 @@ import slicer
 
 from NeuroWorkflowLib.base import NEURO_PREFIX, _button
 from NeuroWorkflowLib.database import NORMALIZATION_ATTRIBUTE, WARNING_STYLE
-from NeuroPETLib import dynamicneuro as dn, neuro, neuroreview as nr, normaldb
+from NeuroPETLib import credits, dynamicneuro as dn, neuro, neuroreview as nr, normaldb, staticneuro as sn
 
 KM_PREFIX = "DynamicPET.Modeling."              # the PET4D Modeling module's attributes of its maps and tables
 COMPARE_MAP_ATTRIBUTE = NEURO_PREFIX + "CompareMap"     # a map the Review/Compare step made ("1")
@@ -42,8 +47,8 @@ class ComparePageMixin:
 
     REVIEW_MEAN_MASK = False        # a striatal tracer's BPnd is low in the cortex: the brain mask alone
     DISPLAY_SETTINGS_KEY = SETTINGS_COMPARE_DISPLAY
-    NO_DATABASE_TEXT = ("No comparison with a normal database yet (it needs the database's mean / SD maps of the "
-                        "parametric map): the maps and the regional values.")
+    NO_DATABASE_TEXT = ("No normal database picked (Normalization step), or it has no mean / SD maps of this map: "
+                        "the maps and the regional values only.")
     COMPARE_TEXT = ("Compare with the database", "Make the maps and the regional values")
 
     # --- page ----------------------------------------------------------------------------------------
@@ -80,6 +85,7 @@ class ComparePageMixin:
         form.addRow(self.mapsLabel)
         layout.addWidget(box)
         self._buildReviewBoxes(layout)
+        self._buildDynamicAddBox(layout)
         layout.addStretch(1)
         self.compareMaps = {}           # {map name: volume node} of the set compared
         self._compareMapsKey = None     # the settings (JSON) of that set
@@ -89,6 +95,181 @@ class ComparePageMixin:
         self.regionValueCombo.connect("activated(int)", lambda i: self._recompare())
         self.remakeMapsButton.connect("clicked()", self.onRemakeMaps)
         return page
+
+    def _buildDynamicAddBox(self, layout):
+        box = qt.QGroupBox("Add this patient to a dynamic normal database")
+        box.toolTip = ("For building a user defined dynamic database from normal subjects: every map of the database's "
+                       "model (made with its kinetic settings and reference region), the summed image and the regions' "
+                       "TAC fit values are saved in its subjects/ folder (on the database grid, MNI 2009c 1 mm); a row "
+                       "is added to subjects.csv. The mean / SD maps are then out of date.")
+        form = qt.QFormLayout(box)
+        self.addDynDbCombo = qt.QComboBox()
+        self.addDynDbCombo.toolTip = "User defined dynamic databases of the database folder (Normalization step)"
+        form.addRow("Database:", self.addDynDbCombo)
+        self.addDynDbCredits = credits.infoBox()
+        form.addRow(self.addDynDbCredits)
+        self.addDynIdEdit = qt.QLineEdit()
+        self.addDynIdEdit.toolTip = "ID of the subject in the database (file names and subjects.csv)"
+        form.addRow("Subject ID:", self.addDynIdEdit)
+        self.addDynButton = _button("Add to database")
+        form.addRow(self.addDynButton)
+        self.addDynLabel = qt.QLabel()
+        self.addDynLabel.wordWrap = True
+        self.addDynLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
+        form.addRow(self.addDynLabel)
+        layout.addWidget(box)
+        self.addDynButton.connect("clicked()", self.onAddToDynamicDatabase)
+        self.addDynDbCombo.connect("activated(int)", lambda i: self._onAddDynDatabasePicked())
+        self._fillAddDynDatabases()
+
+    def _databasesChanged(self):
+        self._fillAddDynDatabases()
+
+    def _fillAddDynDatabases(self):
+        if not hasattr(self, "addDynDbCombo"):
+            return
+        current = self.addDynDbCombo.currentData or ""
+        chosen = getattr(self, "_addDynDbChosen", False)
+        self.addDynDbCombo.blockSignals(True)
+        self.addDynDbCombo.clear()
+        for folder, header, rank, _ in self.databaseRows:
+            if header.get("kind") != normaldb.USER_DEFINED or not normaldb.isDynamic(header):
+                continue
+            self.addDynDbCombo.addItem(("! " if rank else "") + f"{header.get('name')} (n = "
+                                       f"{normaldb.subjectCount(folder, header)})", folder)
+        wanted = current if chosen and current else self._database()
+        self.addDynDbCombo.setCurrentIndex(max(0, self.addDynDbCombo.findData(wanted)))
+        self.addDynDbCombo.blockSignals(False)
+        self._updateAddDynCredits()
+
+    def _onAddDynDatabasePicked(self):
+        self._addDynDbChosen = True
+        self._updateAddDynCredits()
+
+    def _updateAddDynCredits(self):
+        if hasattr(self, "addDynDbCredits"):
+            self.addDynDbCredits.setHtml(credits.databaseHtml(self._header(self.addDynDbCombo.currentData or ""),
+                                                              "No user defined dynamic database in the folder."))
+
+    def _updateAddDynBox(self):
+        if not hasattr(self, "addDynButton"):
+            return
+        sequence, segmentation = self.sequence(), self.node("Segmentation")
+        key = sequence.GetID() if sequence is not None else ""
+        if getattr(self, "_addDynIdFor", None) != key:
+            self._addDynIdFor = key
+            self.addDynIdEdit.text = (sn.suggestedSubjectId({}, sequence.GetName().split(" dynamic ")[0])
+                                      if sequence is not None else "")
+        normalized = sequence is not None and bool(sequence.GetAttribute(NEURO_PREFIX + "Template"))
+        self.addDynButton.enabled = normalized and segmentation is not None and self.addDynDbCombo.count > 0
+        if sequence is not None and not normalized:
+            self.addDynLabel.text = "Normalize the series (Normalization step) to add it to a database."
+        elif self.addDynDbCombo.count == 0 and not self.addDynLabel.text:
+            self.addDynLabel.text = ("No user defined dynamic database in the database folder (create one under the "
+                                     "Dynamic tab of the Neuro PET Database Manager).")
+
+    @staticmethod
+    def _databaseKinetics(header):
+        """A dynamic database's kinetic settings with its reference region's name (dynamicneuro.settingsDifferences)."""
+        settings = normaldb.kinetics(header)
+        if settings is None:
+            return None
+        reference = (header.get("referenceStructure") if header.get("referenceRegion") == normaldb.REF_ATLAS
+                     else normaldb.referenceTitle(header))
+        return dict(settings, reference=reference or "")
+
+    def onAddToDynamicDatabase(self):
+        folder = self.addDynDbCombo.currentData or ""
+        header = self._header(folder)
+        sequence, summed = self.sequence(), self.volume()
+        if header is None or sequence is None:
+            return
+        subjectId = self.addDynIdEdit.text.strip()
+        if not subjectId:
+            slicer.util.warningDisplay("Type the subject ID.", windowTitle="Add to database")
+            return
+        gridPath = sn.referenceMaskPath(folder, header) or (self.atlas or {}).get(neuro.BRAIN_MASK)
+        if not gridPath:
+            slicer.util.errorDisplay(f"'{header['name']}' has no reference mask and the space has no brain mask: no "
+                                     "database grid.", windowTitle="Add to database")
+            return
+        widget = self._modelingWidget()
+        state, settings, error = self._compareKinetics(widget)
+        if error:
+            slicer.util.errorDisplay(error, windowTitle="Add to database")
+            return
+        differences = dn.settingsDifferences(self._databaseKinetics(header), settings, self._lastEndMinutes())
+        if differences:
+            slicer.util.errorDisplay(
+                f"The Modeling step's settings are not those of '{header['name']}':\n- " + "\n- ".join(differences)
+                + "\n\nA database's subjects are all made with its settings: pick the database on the Normalization "
+                "page (the Modeling step then takes them) or set them in the Modeling step.",
+                windowTitle="Add to database")
+            return
+        try:
+            ready = self._ensureCompareMaps()
+            key = self._settingsKey(settings)
+            ready = ready and self._ensureRegionFits(widget, state, settings, key, force=True)
+        except Exception as error:
+            logging.exception("Neuro Compare: the maps failed")
+            slicer.util.errorDisplay(f"Could not make the parametric maps:\n{error}", windowTitle="Add to database")
+            return
+        if not ready:
+            return
+        maps = {name: node for name, node in self.compareMaps.items() if slicer.mrmlScene.IsNodePresent(node)}
+        _, results, names, k2ref = self._regionFits
+        fits = {names[s]: dict(r.get("values") or {}) for s, r in results.items()
+                if not r.get("error") and not nr.isReferenceRegion(names.get(s, ""))}
+        used = self.usedNormalization(sequence) or self.usedNormalization(summed)
+        age, sex = self._reviewAgeAndSex()
+        notes = []
+        if used is None:
+            notes.append("The series' normalization settings are not known.")
+        else:
+            normDifferences = normaldb.normalizationDifferences(header.get("normalization"), used)
+            if normDifferences:
+                notes.append("Normalized otherwise than the database: " + "; ".join(normDifferences) + ".")
+        if self._database() != folder:
+            notes.append("The regions were not locked to this database (it is not the one picked on the Normalization "
+                         "page): its regional statistics need the same regions.")
+        failed = [names.get(s, s) for s, r in results.items() if r.get("error")]
+        if failed:
+            notes.append("Regions not fitted: " + ", ".join(failed[:8]) + (" ..." if len(failed) > 8 else "") + ".")
+        if age is None:
+            notes.append("The age is not known" + (" (the database has age groups)." if header.get("ageStratified")
+                                                   else "."))
+        replace = normaldb.hasSubject(folder, subjectId)
+        if replace:
+            notes.append(f"Subject '{subjectId}' is already in the database: it will be replaced.")
+        text = (f"Add '{sequence.GetName()}' to '{header['name']}' as '{subjectId}'?\n\nMaps: "
+                + ", ".join(normaldb.kinetics(header)["maps"]) + f"; {len(fits)} regions' TAC fits; the summed image.")
+        if notes:
+            text += "\n\n" + "\n".join("- " + n for n in notes)
+        if not slicer.util.confirmOkCancelDisplay(text, windowTitle="Add to database"):
+            return
+        analysis = widget.ensureAnalysis()
+        model = settings["model"]
+        k2Value = k2ref[0] if k2ref else settings.get("k2ref")
+        scanDate = (self.logic.dicomValues(summed, ("0008,0020",))["0008,0020"] or "") if summed is not None else ""
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        try:
+            row = self.logic.addDynamicSubject(
+                folder, header, maps, summed, subjectId, gridPath, age, sex, used, fits, k2ref=k2Value,
+                referenceName=settings.get("reference") or "", settings=settings,
+                writeRegionsCsv=(lambda path: widget.logic.exportCsv(path, analysis, results, model))
+                if analysis is not None else None,
+                source=sequence.GetName(), scanDate=scanDate, replace=replace)
+        except Exception as error:
+            logging.exception("Dynamic Neuro: could not add the subject")
+            slicer.util.errorDisplay(f"Could not add the patient to the database:\n{error}",
+                                     windowTitle="Add to database")
+            return
+        finally:
+            qt.QApplication.restoreOverrideCursor()
+        self._fillDatabases(force=True)
+        count = normaldb.subjectCount(folder, normaldb.readHeader(folder))
+        self.addDynLabel.text = (f"'{row['id']}' added to '{header['name']}' (now {count} subjects). Its mean / SD "
+                                 "maps are out of date: compute them again in the Neuro PET Database Manager.")
 
     def _resetCompareState(self):
         self.compareMaps = {}
@@ -335,12 +516,12 @@ class ComparePageMixin:
         self.mapsLabel.text = "Made " + ", ".join(n.GetName() for n in maps.values()) + note + "."
         return True
 
-    def _ensureRegionFits(self, widget, state, settings, key, forMaps=False):
+    def _ensureRegionFits(self, widget, state, settings, key, forMaps=False, force=False):
         """The regions' fits of these settings: the Modeling step's own (Fit all with the same settings), else made
         now (the Modeling logic). Needed for the TAC fit values, and before SRTM2 maps with the automatic k2' (the
         median of the regions' SRTM fits, the same for the maps)."""
         automaticK2 = settings["model"] == "SRTM2" and settings.get("k2ref") is None
-        if self.regionValueCombo.currentData != dn.REGION_TAC_FIT and not (forMaps and automaticK2):
+        if self.regionValueCombo.currentData != dn.REGION_TAC_FIT and not (forMaps and automaticK2) and not force:
             return True
         if self._regionFits is not None and self._regionFits[0] == key:
             return True
@@ -446,8 +627,15 @@ class ComparePageMixin:
 
     # --- hooks of the review mixins ---------------------------------------------------------------------
     def _reviewHeader(self, folder):
-        # a dynamic database's mean / SD maps per parametric map: not yet (the comparison with it comes later)
-        return None
+        """The dynamic database's header as the map picked's (normaldb.mapHeader: its mean / SD, regional statistics
+        of the regional value picked, surface projections); None without a database or its maps of that map."""
+        header = self._header(folder) if folder else None
+        name = self._selectedMapName()
+        if header is None or not normaldb.isDynamic(header) or not name or \
+                name not in normaldb.statisticsMaps(header):
+            return None
+        how = self.regionValueCombo.currentData if hasattr(self, "regionValueCombo") else dn.REGION_TAC_FIT
+        return normaldb.mapHeader(header, name, how or dn.REGION_TAC_FIT)
 
     def _reviewAgeAndSex(self):
         return self.logic.ageAndSex(self.sequence())
@@ -517,6 +705,18 @@ class ComparePageMixin:
             if differences:
                 lines.append(WARNING_STYLE.format(f"Not the kinetic settings of '{header.get('name')}': "
                                                   + "; ".join(differences) + "."))
+        if header is not None and normaldb.isDynamic(header):
+            computed = normaldb.statisticsMaps(header)
+            name = self._selectedMapName()
+            if not computed:
+                lines.append(f"'{header.get('name')}' has no mean / SD maps yet (compute them in the Neuro PET "
+                             "Database Manager): regional values only.")
+            elif name and name not in computed:
+                lines.append(WARNING_STYLE.format(f"'{header.get('name')}' has no mean / SD of {name} (it has "
+                                                  f"{', '.join(computed)})."))
+            elif (header.get("statistics") or {}).get("stale"):
+                lines.append(WARNING_STYLE.format(f"The mean / SD maps of '{header.get('name')}' are out of date "
+                                                  "(subjects added or removed since)."))
         if settings and self.compareMaps and self._compareMapsKey != self._settingsKey(settings):
             lines.append(WARNING_STYLE.format("The Modeling step's settings changed: the maps are made again."))
         self.kineticsLabel.text = "<br>".join(lines)

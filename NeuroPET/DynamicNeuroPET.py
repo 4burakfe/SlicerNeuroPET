@@ -80,6 +80,7 @@ from NeuroWorkflowLib import scenestate  # noqa: E402
 from NeuroWorkflowLib.database import (NormalizationDatabaseMixin, RegionsDatabaseMixin,  # noqa: E402
                                        NORMALIZATION_ATTRIBUTE, registerRegionsLayout, seriesInfo)
 from NeuroWorkflowLib.compare import ComparePageMixin, COMPARE_MAP_ROLE  # noqa: E402
+from NeuroWorkflowLib.dynamicdb import DynamicDatabaseLogicMixin  # noqa: E402
 from NeuroPETLib import neuroreview as nr  # noqa: E402
 # the review of the Static Neuro module (its mixins) on the parametric maps: the Review/Compare step
 from StaticNeuroPETLib.constants import STEP_REVIEW  # noqa: E402
@@ -134,10 +135,11 @@ class DynamicNeuroPET(ScriptedLoadableModule):
                                     DynamicNeuroPETWidget.LAYOUT_STEPS)
 
 
-class DynamicNeuroPETLogic(ReviewLogicMixin, DatabaseLogicMixin, NeuroWorkflowLogic):
+class DynamicNeuroPETLogic(DynamicDatabaseLogicMixin, ReviewLogicMixin, DatabaseLogicMixin, NeuroWorkflowLogic):
     """The workflow's logic (NeuroWorkflowLib.base.NeuroWorkflowLogic): normalization and regions; usable without the
     widget (see there). The dynamic normal databases of the database folder (NeuroWorkflowLib.database); the
-    comparison of a map (the Static Neuro review's logic: StaticNeuroPETLib.logic_review / logic_database)."""
+    comparison of a map (the Static Neuro review's logic: StaticNeuroPETLib.logic_review / logic_database); a patient
+    added to a dynamic database (NeuroWorkflowLib.dynamicdb)."""
 
     DATABASE_MODE = normaldb.DYNAMIC
     REFERENCE_COLOR = (0.6, 0.6, 0.6)       # the reference region has no regional value of its own: grey
@@ -210,6 +212,7 @@ class DynamicNeuroPETWidget(ComparePageMixin,
         if not hasattr(self, "kineticsLabel"):
             return
         self._updateCompareBox()
+        self._updateAddDynBox()
         self._updateReviewPage()
         self._updateReviewTools()
 

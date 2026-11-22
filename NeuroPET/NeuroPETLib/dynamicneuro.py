@@ -15,7 +15,7 @@ from NeuroPETLib import normaldb
 COMPARE_MODELS = tuple(normaldb.KINETIC_MAPS)
 TIME_MANUAL = "manual"              # DynamicPETModeling's typed injection time
 # the regional value of a region: its TAC fitted with the model (default), or the mean of the voxel map in it
-REGION_TAC_FIT, REGION_VOXEL_MEAN = "tac", "voxel"
+REGION_TAC_FIT, REGION_VOXEL_MEAN = normaldb.REGION_TAC_FIT, normaldb.REGION_VOXEL_MEAN
 REGION_VALUES = ((REGION_TAC_FIT, "TAC fit of the region (model fitted to its mean curve)"),
                  (REGION_VOXEL_MEAN, "Mean of the voxel map in the region"))
 SETTING_TITLES = {"model": "model", "reference": "reference region", "weighting": "frame weighting",

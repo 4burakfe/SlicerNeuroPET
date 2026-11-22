@@ -364,15 +364,23 @@ class DatabaseLogicMixin(DatabaseFolderLogicMixin):
     @staticmethod
     def subjectRegionValues(folder, header, masks, progress=None):
         """{subject ID: {region: mean}} of the subjects' maps (SUVR or SUV by the map type; not smoothed) of a user
-        defined database. progress(index, total, text) returns False to stop (None returned)."""
+        defined database; a dynamic database's map (normaldb.mapHeader) with the TAC fit values: those of the
+        subjects' region fits. progress(index, total, text) returns False to stop (None returned)."""
         subjects = normaldb.readSubjects(folder)
         mapKey = normaldb.subjectMapKey(header)
         values = {}
+        tacFits = normaldb.isDynamic(header) and (header.get("regionValues") or normaldb.REGION_TAC_FIT) == \
+            normaldb.REGION_TAC_FIT
         for index, subject in enumerate(subjects):
             if progress is not None and not progress(index, len(subjects), f"{subject['id']} ({index + 1} / "
                                                                            f"{len(subjects)})"):
                 return None
-            relative = subject.get(mapKey)
+            if tacFits:         # by region name: the database's region fits (the regions' names as the patient's)
+                found = normaldb.fitValues(normaldb.readFits(folder, subject), mapKey[len(normaldb.MAP_KEY_PREFIX):])
+                if found:
+                    values[subject["id"]] = found
+                continue
+            relative = normaldb.subjectMapFile(subject, mapKey)
             path = os.path.join(folder, relative) if relative else ""
             if not path or not os.path.isfile(path):
                 continue
@@ -390,7 +398,7 @@ class DatabaseLogicMixin(DatabaseFolderLogicMixin):
         the mean / SD maps. None when stopped."""
         names = list(masks)
         version = header.get("version", 1)
-        mapKey = normaldb.subjectMapKey(header)
+        mapKey = normaldb.regionValuesKey(header)
         path = nr.regionsPath(folder, header)
         if locked and path:
             document = nr.readJson(path)

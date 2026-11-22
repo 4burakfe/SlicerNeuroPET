@@ -2168,11 +2168,16 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         box = qt.QGroupBox("Normalization")
         form = qt.QFormLayout(box)
-        # the settings (method, template, registration) folded away: set by default (or by the database)
+        # the settings in two boxes: what is registered to what (method, space, template volume; open) and how
+        # (engine, its options, initialization; folded away: set by default or by the database)
         self.normSettingsBox = ctk.ctkCollapsibleButton()
-        self.normSettingsBox.text = "Normalization settings"
-        self.normSettingsBox.collapsed = True
+        self.normSettingsBox.text = "Method and template"
+        self.normSettingsBox.collapsed = False
         settingsForm = qt.QFormLayout(self.normSettingsBox)
+        self.normRegBox = ctk.ctkCollapsibleButton()
+        self.normRegBox.text = "Registration settings"
+        self.normRegBox.collapsed = True
+        regForm = qt.QFormLayout(self.normRegBox)
         self.methodCombo = qt.QComboBox()
         for key, title in self.NORM_METHODS:
             self.methodCombo.addItem(title, key)
@@ -2224,7 +2229,7 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.normEngineCombo.toolTip = ("BRAINSFit: the steps below. Iterative multi-resolution (as in EasyReg): a "
                                         "rigid (or affine) stage, then B-spline passes coarse to fine on a working "
                                         "grid of a few mm (little memory).")
-        settingsForm.addRow("Registration:", self.normEngineCombo)
+        regForm.addRow("Registration:", self.normEngineCombo)
         self.normBrainsBox = qt.QWidget()
         brainsForm = qt.QFormLayout(self.normBrainsBox)
         brainsForm.setContentsMargins(0, 0, 0, 0)
@@ -2322,15 +2327,15 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         advancedForm.addRow(resetButton)
         brainsForm.addRow(advanced)
         self._resetNormAdvanced()
-        settingsForm.addRow(self.normBrainsBox)
-        settingsForm.addRow(self.normIterativeBox)
+        regForm.addRow(self.normBrainsBox)
+        regForm.addRow(self.normIterativeBox)
         self.normInitCombo = qt.QComboBox()
         for title, mode in reg.INITIALIZATIONS:
             self.normInitCombo.addItem(title, mode)
         self.normInitCombo.toolTip = ("How the first step starts. Centers of mass (default for the PET) puts the "
                                       "brain activity on the template's head; geometric centers (default for the "
                                       "CT/MR) aligns the volume centres.")
-        settingsForm.addRow("Initialization:", self.normInitCombo)
+        regForm.addRow("Initialization:", self.normInitCombo)
         self.normImageSelector = self._nodeSelector(
             ["vtkMRMLScalarVolumeNode"],
             "The PET image registered to the template (PET methods): the series' summed image by default, or another "
@@ -2342,6 +2347,7 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         else:
             self.normImageSelector.visible = False
         form.addRow(self.normSettingsBox)
+        form.addRow(self.normRegBox)
         # what the template is, the references to cite and its license (read only)
         self.templateCredits = credits.infoBox()
         form.addRow(self.templateCredits)
@@ -3585,8 +3591,8 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         return states.get(key) != STATE_WAITING
 
     def _skipStep(self, key):
-        """Whether Back / Next pass over step key (none here)."""
-        return False
+        """Whether Back / Next pass over step key: the CT/MR registration when there is no CT/MR."""
+        return key == STEP_REG and self.anatomy() is None
 
     def _neighbourStep(self, delta, states=None):
         """The step Back (delta -1) / Next (+1) goes to (passing over the skipped steps); None when there is none or

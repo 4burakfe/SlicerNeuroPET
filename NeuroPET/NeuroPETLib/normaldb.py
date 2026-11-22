@@ -130,7 +130,9 @@ MASTER = "master"
 MASTER_TITLE = "Master (all subjects)"
 IMAGE_EXTENSIONS = (".nii.gz", ".nii", ".nrrd", ".nhdr", ".mha", ".mhd")
 SUBJECT_COLUMNS = ("id", "age", "sex", "scanDate", "added", "suvFile", "suvrFile", "referenceMean", "reference",
-                   "normalization", "source", "nativeFile", "anatomy", "anatomyFile", "anatomyNativeFile")
+                   "normalization", "source", "nativeFile", "anatomy", "anatomyFile", "anatomyNativeFile",
+                   # dynamic: {map name: file} (JSON), the regions' TAC fit values (JSON), their TACs (CSV)
+                   "mapFiles", "fitsFile", "tacsFile")
 # How the subjects' maps are stored (shown in the Pipeline of a database; written into database.json)
 STORAGE = {"grid": "MNI ICBM 152 2009c, 1 mm (the reference mask's grid)", "interpolation": "linear",
            "smoothing": "none (the database's FWHM is applied when the mean / SD are computed, and to the patient)",
@@ -1244,8 +1246,146 @@ TEMPLATE_NAME = "template.nii.gz"
 
 def subjectMapKey(header):
     """Column of subjects.csv whose maps the mean / SD are made of: the ratio maps (SUVR / Ratio) or the SUV /
-    count maps, by the database's map type."""
+    count maps, by the database's map type. A dynamic database: 'map_<name>' of its map compared (a mapHeader's) or
+    its primary map (subjectMapFile reads it)."""
+    if isDynamic(header):
+        return MAP_KEY_PREFIX + (header.get("compareMap") or kinetics(header)["primaryMap"])
     return "suvrFile" if header.get("mapType") in (MAP_SUVR, MAP_RATIO) else "suvFile"
+
+
+# ---------------------------------------------------------------------------
+# Dynamic databases: the parametric maps of each subject and their statistics
+# ---------------------------------------------------------------------------
+MAP_KEY_PREFIX = "map_"
+# the regional value of a dynamic database: its regions' TACs fitted with the model, or the mean of the voxel map
+REGION_TAC_FIT, REGION_VOXEL_MEAN = "tac", "voxel"
+REGION_VALUE_KINDS = (REGION_TAC_FIT, REGION_VOXEL_MEAN)
+
+
+def isDynamic(header):
+    return (header or {}).get("mode") == DYNAMIC
+
+
+def isRatioMap(header):
+    """Whether the patient's image is divided by its reference region before the comparison: the ratio maps (SUVR /
+    Ratio) of a static database (a dynamic database's maps are relative to the reference already)."""
+    return (header or {}).get("mapType") in (MAP_SUVR, MAP_RATIO) and not isDynamic(header)
+
+
+def mapFileName(subjectId, mapName, extension=".nii.gz"):
+    """A dynamic subject's parametric map (on the database grid), relative to the database folder."""
+    return f"{subjectDir(subjectId)}/{safeName(subjectId) or 'subject'}_{safeName(mapName) or 'map'}{extension}"
+
+
+def summedFileName(subjectId, extension=".nii.gz"):
+    """A dynamic subject's summed image normalized (on the database grid): the PET to PET template's source."""
+    return f"{subjectDir(subjectId)}/{safeName(subjectId) or 'subject'}_summed{extension}"
+
+
+def fitsFileName(subjectId):
+    """A dynamic subject's regional TAC fit values (JSON)."""
+    return f"{subjectDir(subjectId)}/{safeName(subjectId) or 'subject'}_fits.json"
+
+
+def regionsCsvName(subjectId):
+    """A dynamic subject's region fits as CSV (the TACs beside it: <id>_regions_TACs.csv)."""
+    return f"{subjectDir(subjectId)}/{safeName(subjectId) or 'subject'}_regions.csv"
+
+
+def subjectMapFiles(subject):
+    """{map name: relative file} of a dynamic subject (its mapFiles column)."""
+    text = (subject or {}).get("mapFiles") or ""
+    try:
+        files = json.loads(text) if text else {}
+    except ValueError:
+        return {}
+    return {str(k): str(v) for k, v in files.items() if v} if isinstance(files, dict) else {}
+
+
+def subjectMapFile(subject, mapKey):
+    """The relative file of a subject's map of subjectMapKey ('suvrFile', 'suvFile' or 'map_<name>'); '' if none."""
+    if str(mapKey).startswith(MAP_KEY_PREFIX):
+        return subjectMapFiles(subject).get(mapKey[len(MAP_KEY_PREFIX):], "")
+    return (subject or {}).get(mapKey) or ""
+
+
+def regionValuesKey(header):
+    """The key of a database's regional values (regions.json 'maps', the cache): subjectMapKey, and for a dynamic
+    database the kind of value (TAC fit or voxel map mean) too."""
+    key = subjectMapKey(header)
+    if isDynamic(header):
+        key += "_" + (header.get("regionValues") or REGION_TAC_FIT)
+    return key
+
+
+def readFits(folder, subject):
+    """{"model", "k2ref", "regions": {region: {map: value}}} of a dynamic subject's regional TAC fits; None without."""
+    relative = (subject or {}).get("fitsFile") or ""
+    path = os.path.join(folder, relative) if relative else ""
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as stream:
+            document = json.load(stream)
+    except (OSError, ValueError):
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def fitValues(document, mapName):
+    """{region: value} of one map in a readFits document (regions without a finite value left out)."""
+    out = {}
+    for region, values in ((document or {}).get("regions") or {}).items():
+        value = (values or {}).get(mapName)
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value):
+            out[region] = value
+    return out
+
+
+def mapStatsFileName(key, mapName, which, extension=".nii.gz"):
+    """stats/ file of a group's map of a dynamic database: <key>_<map>_mean / _sd."""
+    return f"{STATS_DIR}/{key}_{safeName(mapName) or 'map'}_{which}{extension}"
+
+
+def mapRegionsFileName(mapName, how):
+    """stats/ regional statistics of a dynamic database's map: regions_<map>_<tac|voxel>.json."""
+    return f"{STATS_DIR}/regions_{safeName(mapName) or 'map'}_{how}.json"
+
+
+def mapSspFileName(mapName):
+    """stats/ normals' surface projections of a dynamic database's map: ssp_<map>.npz."""
+    return f"{STATS_DIR}/ssp_{safeName(mapName) or 'map'}.npz"
+
+
+def statisticsMaps(header):
+    """The maps of a dynamic database with mean / SD maps (of the master group)."""
+    master = ((header or {}).get("statistics") or {}).get("groups", {}).get(MASTER) or {}
+    return [name for name, entry in (master.get("maps") or {}).items() if entry.get("mean") and entry.get("sd")]
+
+
+def mapHeader(header, mapName, regionValues=REGION_TAC_FIT):
+    """A dynamic database's header as one of its maps' (what the static review reads): the groups' mean / SD, the
+    regional statistics (of the TAC fits or the voxel map means) and the surface projections of mapName; the map type
+    the map's name (never divided by the reference again). Groups without that map are left out."""
+    out = json.loads(json.dumps(header or {}))
+    stats = out.setdefault("statistics", {})
+    out["compareMap"] = mapName
+    out["mapType"] = mapName
+    out["regionValues"] = regionValues
+    groups = {}
+    for key, group in (stats.get("groups") or {}).items():
+        entry = (group.get("maps") or {}).get(mapName) or {}
+        if entry.get("mean") and entry.get("sd"):
+            groups[key] = dict(group, mean=entry["mean"], sd=entry["sd"])
+    stats["groups"] = groups
+    perMap = (stats.get("mapStatistics") or {}).get(mapName) or {}
+    stats["regions"] = (perMap.get("regions") or {}).get(regionValues)
+    stats["ssp"] = perMap.get("ssp")
+    return out
 
 
 def statisticsGroups(header, subjects):

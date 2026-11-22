@@ -123,7 +123,7 @@ class ReviewLogicMixin:
             raise ValueError("The mean and SD maps of the database are not on the same grid.")
         suv = self.resampledArray(volume, grid)
         values = suv
-        ratio = header.get("mapType") in (normaldb.MAP_SUVR, normaldb.MAP_RATIO)
+        ratio = normaldb.isRatioMap(header)       # a dynamic database's maps: relative to the reference already
         if ratio:
             maskPath = sn.referenceMaskPath(folder, header)
             if maskPath:
@@ -317,7 +317,7 @@ class ReviewLogicMixin:
             if progress is not None and not progress(index, len(subjects), f"surface projection of {subject['id']} "
                                                                            f"({index + 1} / {len(subjects)})"):
                 return None
-            relative = subject.get(mapKey)
+            relative = normaldb.subjectMapFile(subject, mapKey)
             path = os.path.join(folder, relative) if relative else ""
             if not path or not os.path.isfile(path):
                 continue

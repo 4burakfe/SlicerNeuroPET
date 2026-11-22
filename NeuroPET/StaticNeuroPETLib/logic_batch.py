@@ -547,9 +547,10 @@ class BatchLogicMixin:
         running, geometry = normaldb.RunningStatistics(), None
         fwhm = float(header.get("smoothingFwhmMm") or 0)
         for subject in normaldb.readSubjects(folder):
-            if subject["id"] not in wanted or not subject.get(mapKey):
+            if subject["id"] not in wanted or not normaldb.subjectMapFile(subject, mapKey):
                 continue
-            node = slicer.util.loadVolume(os.path.join(folder, subject[mapKey]), {"show": False})
+            node = slicer.util.loadVolume(os.path.join(folder, normaldb.subjectMapFile(subject, mapKey)),
+                                         {"show": False})
             if node is None:
                 continue
             try:
