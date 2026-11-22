@@ -21,7 +21,7 @@ Brain PET and SPECT workflows for 3D Slicer: **Dynamic Neuro Receptor PET**, **S
 - **Review** of a static study against a normal database: voxel z / Crawford-Howell t maps, regional scores and
   **3D-SSP** (Minoshima) surface projections, in single or dual monitor layouts, including slices with **3D-SSP cut at
   the slice**.
-- Dynamic receptor PET: motion correction, CT / MR registration, normalization, regions and kinetic modeling (SRTM)
+- Dynamic receptor PET: motion correction, CT / MR registration, normalization, regions and kinetic modeling (SRTM2, SRTM, Logan, SUVR)
   through the PET4D modules.
 
 ## Screenshots
@@ -74,9 +74,18 @@ without, the result is kept, or stay).
    BIDS name (`_T1w`, `_T2w`, `_FLAIR`, `_PDw`, `_ct`) or the `.json` sidecar (modality, series description, TR /
    TE). **Smoothing** (off by default): for a series reconstructed without a post filter, every frame and the
    summed image are smoothed with a Gaussian (FWHM in mm, default 4) in place when you go on from the Data step, so
-   before the motion correction; once per series (load it again to undo).
+   before the motion correction; once per series (load it again to undo). **Resample to** (off by default): the
+   frames and the summed image resampled to cubic voxels of the size entered (default 2 mm; linear by default, or
+   nearest, B-spline, Lanczos) over the same field of view; the panel shows the image size and memory now and after.
+   With smoothing too, the series is smoothed first, then resampled. 2 mm voxels need several times less memory
+   than a high resolution reconstruction, for every later step.
 2. **Motion correction** (Dynamic PET Motion Correction).
-3. **CT/MR registration** (Dynamic PET to CT/MR Registration).
+3. **CT/MR registration** (Dynamic PET to CT/MR Registration): iterative, **rigid by default**, *Affine* can be
+   picked as the linear stage (no deformable passes; the other engines hidden in this workflow).
+   **Memory:** every step overwrites the series by default and keeps no copy of it: smoothing and resampling on the
+   Data step, and Harden with *Overwrite* (the default; it cannot be undone, load the series again to start over) in
+   motion correction, CT/MR registration and normalization. *Save separately* keeps the old series next to the new
+   one (Revert removes the new one) until a later step hardens.
 4. **Normalization** to the **MNI ICBM 152 nonlinear symmetric 2009c** template (the method, template and
    registration settings under **Normalization settings**, folded at start; a PET template, the synthetic PET or a
    database's mean PET, is shown in inverted grey here and in the Regions step). By default the **iterative
@@ -100,15 +109,23 @@ without, the result is kept, or stay).
    **12-subdivision grid** (*B-spline grid*; control points about 16 mm apart) and a stopping factor of 1e9 instead of
    BRAINSFit's 2e13; it samples 0.005 of the voxels (*Sampling*; BRAINSFit's default 0.002). Every BRAINSFit option of the normalization is under **Advanced (BRAINSFit)**: *Register at*, *B-spline grid* (one number or i,j,k), *Sampling*, *Iterations*, *Histogram bins*, *Convergence factor*, *Gradient tolerance*, *Max evaluations*, *Max corrections*, *Max B-spline shift* and *Threads* (fewer threads use less memory), with *Reset to defaults*;
    **Harden** resamples every frame and the summed image onto the template's field of view (PET voxel size by
-   default) into a new series *"&lt;series&gt; MNI"* (or overwrites it). **Revert** undoes it.
+   default), overwriting the series by default (cannot be undone) or into a new series *"&lt;series&gt; MNI"*
+   (**Revert** removes it).
 5. **Regions:** a **segmentation** of the space (from the atlas library, below) and its **grouping**:
    **Regions R/L** (every structure, left and right separate, *Putamen R* / *Putamen L*), **Broad regions R/L**
    (structures merged by `groups.csv`) or **Broad (Compatible)** (by `groups_compatible.csv`); a grouping is offered
    only when the segmentation has its table. The **reference region** is any region of the picked segmentation and
    grouping with the sides merged (default: **Cerebellum Gray Matter**, added as *"Cerebellum Gray Matter
-   (reference)"*), or the **Centrum Semiovale (white matter)** of the space: the white matter above the lateral
-   ventricles with a white matter probability of at least 0.9, in no CerebrA region (about 113 ml in MNI 2009c; made
-   from the space's `WM` map and the CerebrA ventricles, whatever segmentation is picked). It is the reference for
+   (reference)"*; it replaces the regions it is made of, *Cerebellum Gray Matter R / L*: a reference region has no
+   result or score of its own, and the regions stay one label map layer, so that saving the scene is fast; with a
+   database's reference mask of an atlas region its regions are found in the atlas; a global or custom mask
+   overlaps the regions and leaves them whole), or the **Centrum Semiovale (white matter)**: the segment *Centrum Semiovale* drawn by hand in the
+   picked segmentation's `labels.seg.nrrd` (CerebrA: about 100 ml, CerebrA PET: about 105 ml, from the top of the
+   lateral ventricles' level up). It is also a region (*Centrum Semiovale R / L*, `labels.csv` values 105 / 106, split
+   at the midline; never grown, in no Broad group, left out of the brain the 3D-SSP rays run in), so the reference
+   list shows it as *Centrum Semiovale*. For a segmentation without it,
+   the white matter above the lateral ventricles with a white matter probability of at least 0.9, in no CerebrA
+   region (about 113 ml in MNI 2009c; from the space's `WM` map and the CerebrA ventricles). It is the reference for
    tracers that bind in all grey matter (synaptic density, [11C]UCB-J: the cerebellum is no reference); erode it a
    few mm against spill-over. Segment names come from the segment names of `labels.seg.nrrd` (*Caudate R*; *Segment_<value>*
    is read too); the label numbers and the list of regions come from `labels.csv`. The label maps of the groupings are
@@ -117,7 +134,8 @@ without, the result is kept, or stay).
    **CerebrA** (CerebrA with the pons added as *Pons R* / *Pons L*, the rest of the brainstem as *Brainstem (except
    pons)*, no optic chiasm) and **CerebrA PET** (CerebrA edited for PET: caudate edited, left mirrored, the regions
    already grown into the white matter: cortex 3 mm; cingulate, insula, basal ganglia, thalamus, amygdala,
-   hippocampus 2 mm; brainstem, pons, cerebellum, diencephalon not grown; use it with 0 mm growth).
+   hippocampus 2 mm; brainstem, pons, cerebellum, diencephalon not grown; use it with 0 mm growth). **CerebrA PET is
+   the default** (the original CerebrA draws the sulci deep and wide); new databases use it too.
    **Broad regions:** prefrontal, orbitofrontal, sensorimotor, anterior / posterior cingulate, precuneus, lateral
    parietal, lateral / mesial temporal, insula, lateral / medial occipital, caudate, putamen, ventral striatum,
    pallidum, thalamus, cerebellum, vermis, brainstem (except pons), pons; the ventricles and the optic chiasm are left
@@ -139,8 +157,20 @@ without, the result is kept, or stay).
    (mm, off by default): the reference region, taken from the atlas before growing, is eroded against spill-over.
    **Output segmentation:** the segmentation the regions are written into (its segments replaced), by default the
    one loaded before, so loading again does not pile up segmentations; *Create new segmentation* makes a new one.
-6. **Modeling** (Dynamic PET Modeling), ready with the normalized series, the regions, **SRTM**, the reference region
+6. **Modeling** (Dynamic PET Modeling), ready with the normalized series, the regions, **SRTM2** (SRTM with the reference's k2' fixed, by default the median k2' of the regions' SRTM fits: stable where SRTM drifts to BPnd = 100), the reference region
    and the putamen as the target.
+
+**Dynamic normal database.** The Normalization step has a **Normal database** box like the Static workflow's: the
+dynamic databases of the database folder (the Database Manager's), the ones matching the series' nuclide and tracer
+first, or **None** (the workflow goes on without one; the Compare step then gives the regional values only). A picked
+database's normalization settings become the step's defaults, its spaces are offered (*From DB*), and **Summed PET to
+PET template** registers the summed image to the database's PET template (of its subjects' summed images). The
+normalization's settings are kept on the hardened series (`DynamicPET.Neuro.Normalization`) and compared with the
+database's. The **Regions** step is locked to the database's region settings (segmentation, grouping, growth,
+reference region and erosion; **Unlock** to change them) and shows the 3x2 regions views (the summed PET alone, on the
+MNI T1 and on the normalization's template; axial and coronal). **Modeling** is set to the database's kinetic model
+and settings (model, weighting, time zero, t\*, k2', SUVR window, clipping) once per database, series and regions, so
+the patient's maps are made as the subjects' were; the reference region stays the workflow's.
 
 **Atlas library.** Spaces and segmentations are read from two folders: the user's atlas folder
 `~/NeuroPET/Atlas` (made on first use; **Open atlas folder** in the Normalization step and the Database Manager
@@ -177,6 +207,16 @@ Manager), a read-only box shows what it is, the references to cite and its licen
 shows the database's own description (Edit settings: Notes) first, so a shared database carries the credits of
 its data with it.
 
+**Saved scenes.** Save Scene (or a .mrb) keeps the workflow: the step on screen and whether the module was shown are
+kept in the module's parameter node with the series, CT/MR, template, regions and (Static) the review's score map and
+region table. Loading the scene shows the module again on that step and builds its views again: the regions views,
+the review (compared again into the saved score map and table, with the 3D-SSP), the Modeling step (fitted again
+with the saved settings, see PET4D's Dynamic PET Modeling). The workflow's layouts are known from startup, so a scene
+saved in one of them opens its views. Helper nodes of the views (3D-SSP models, colored and grey copies of the PET,
+the unfolded maps) are not saved: they are made again. A result that was not hardened (normalization, CT/MR
+registration) is not kept; that step opens without it, in the four-up layout. A scene saved before this shows the
+step of the layout it was saved in (regions, review, modeling).
+
 ## Neuro PET Database Manager
 
 The **Neuro PET Database Manager** module (*Mergen - Neuro PET - Database Manager*, Nuclear Medicine) keeps normal databases of brain PET and
@@ -194,8 +234,20 @@ a folder in it, named after the database:
     stats/                 master_mean / master_sd (all subjects) and age_<group>_mean / _sd
 ```
 
-- **Static** tab (the Dynamic tab comes next): the databases in a table (type, nuclide, tracer, subjects,
+- **Static** tab: the databases in a table (type, nuclide, tracer, subjects,
   reference region, age groups, state of the mean / SD maps, version) with the details of the selected one.
+- **Dynamic** tab: the dynamic databases (PET only) in the same table, with their **kinetic model and maps**.
+  *Create new database*, *Edit settings*, *Delete* and *Open folder* work as in the Static tab; adding subjects
+  (BIDS series, the Dynamic Neuro workflow), the mean / SD maps and the predefined databases come next. A dynamic
+  database keeps, besides the static settings, its **kinetic model** (`kinetics` in database.json), the same PET4D
+  code making the subjects' and the patients' maps: **SRTM2** (default; the reference's k2' fixed, given or per subject the median of its regions' SRTM fits), **SRTM** (BPnd, R1 and k2 maps by basis functions),
+  the **Logan plot** with a reference region (DVR and BPnd; t\* and an optional k2' of the reference) or **SUVR** in a
+  late time window (default the last 30 min). Every voxel map of the model is kept; the **primary map** is the one
+  compared first. Also the frame weighting, the **time zero** (start of the first frame or the injection time) and
+  the **protocol** (start and length of the series). The reference region is a region of the segmentation (or the
+  centrum semiovale, or a mask file; not the whole brain). Plasma input models are left out: an image derived input
+  does not compare between subjects. Once a subject is in, the model and the reference region are fixed, since its
+  maps were made with them from a series that is not kept.
 - **Modality, nuclide, tracer**: PET (SUV / SUVR maps) or SPECT (counts / ratio maps, Tc-99m, I-123, Tl-201).
   Picking a nuclide lists only its tracers; the first entry is the nuclide itself (tracer not given), and any
   other nuclide or tracer can be typed.
@@ -315,8 +367,8 @@ step; a step opens at its top. Without a CT / MR, Next goes from the data straig
    the subject hierarchy; the BIDS subject of an imported file as the ID), **age and sex** (from the tags); all can be
    typed. **Other sequences**: more volumes of the patient lying on the CT / MR (FLAIR, T2, ...), normalized with the
    same transform in step 3 for the fusion of the review.
-2. **CT/MR registration** (optional): the image registered to the patient's own CT / MR, **iterative rigid only**
-   (no scaling, no deformable passes; final resolution and quality can be set), checked in the registration layout,
+2. **CT/MR registration** (optional): the image registered to the patient's own CT / MR, **iterative, rigid by
+   default** (*Affine* can be picked as the linear stage; no deformable passes; final resolution and quality can be set), checked in the registration layout,
    corrected by hand, then hardened (saved separately or overwritten; Revert).
 3. **Normalization**: first the **normal database** the patient is compared with, from the database folder of the
    Database Manager. Databases of the image's modality, nuclide and tracer are listed first and the best one is
@@ -333,7 +385,7 @@ step; a step opens at its top. Without a CT / MR, Next goes from the data straig
    PET) is shown in inverted grey here and in the Regions step. **Harden** resamples onto the template grid (1 mm)
    and overwrites the image by default (Revert puts it back). The settings used are kept on the normalized image
    (`DynamicPET.Neuro.Normalization`).
-4. **Regions**: the CerebrA regions. The database sets the region settings (atlas, growth, white matter, reference
+4. **Regions**: the CerebrA PET regions by default. The database sets the region settings (atlas, growth, white matter, reference
    region from its own reference mask): they are locked; **Unlock** (with a warning) changes them. Without a
    database the workflow goes on and the review gives the regional values only.
 5. **Review**: the patient compared with the normal database. Entering the step compares automatically (once per
@@ -444,7 +496,7 @@ step; a step opens at its top. Without a CT / MR, Next goes from the data straig
      click a region to show it alone on the slices for 5 s, the slices moved through it.
    - **3D-SSP** (Minoshima et al. 1995): the surface of all the regions together, and for the medial views each
      hemisphere's: only with regions with sides ("... L" / "... R"), each hemisphere's surface made from its own
-     regions (not cut at the midline; a bilateral reference left out); with bilateral regions no medial views and
+     regions (not cut at the midline; a bilateral reference split at the midline); with bilateral regions no medial views and
      2 x 3 views. Stored with the brain's in `ssp.npz` (a database with bilateral regions has no medial surfaces:
      with an R / L segmentation its subjects are projected on the hemispheres on the fly and cached; an older
      `ssp.npz` is not used: compute the mean / SD again); each vertex takes the maximum of
@@ -494,6 +546,8 @@ NeuroPET/
   NeuroWorkflowLib/                the workflow both Neuro modules are built on:
     base.py                        NeuroWorkflowLogic / NeuroWorkflowWidget (normalization, regions, steps,
                                    toolbar, Data / Normalization / Regions pages; DynamicNeuroPET.py re-exports it)
+    database.py                    the normal database in both workflows: database folder and list (logic), the
+                                   Normalization page's database box, the Regions lock and the 3x2 regions views
   StaticNeuroPET.py                Static Neuro PET/SPECT workflow (visible, Nuclear Medicine)
   StaticNeuroPETLib/                its parts, one file per step / topic (mixins of its logic and widget):
     constants.py, helpers.py         steps, settings keys, attributes, display defaults; screens, step icons

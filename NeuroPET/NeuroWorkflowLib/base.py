@@ -42,6 +42,7 @@ from DICOMGatedDynamicPETLib.hardendialog import hardenDialog  # noqa: E402
 from NeuroPETLib import credits, neuro, normaldb  # noqa: E402
 from NeuroPETLib import staticneuro as sn  # noqa: E402
 from NeuroPETLib.banner import MergenBanner  # noqa: E402
+from NeuroWorkflowLib import scenestate  # noqa: E402
 
 PREFIX = "DynamicPET."
 REG_PREFIX = "DynamicPET.Registration."
@@ -58,6 +59,13 @@ SETTINGS_DYNAMIC_IMPORT_FOLDER = "DICOMGatedDynamicPET/DynamicNeuro/ImportFolder
 SETTINGS_SMOOTH_FWHM = "DICOMGatedDynamicPET/DynamicNeuro/SmoothFwhmMm"
 DEFAULT_SMOOTH_FWHM_MM = 4.0        # Gaussian smoothing of the series on the Data page (off by default)
 SMOOTHING_ATTRIBUTE = NEURO_PREFIX + "SmoothingFwhmMm"      # on a smoothed series and its frames (mm FWHM)
+# Resampling of the series on the Data page (off by default; after the smoothing when both are on): isotropic voxels
+SETTINGS_RESAMPLE_MM = "DICOMGatedDynamicPET/DynamicNeuro/ResampleMm"
+SETTINGS_RESAMPLE_METHOD = "DICOMGatedDynamicPET/DynamicNeuro/ResampleMethod"
+DEFAULT_RESAMPLE_MM = 2.0
+RESAMPLE_METHODS = (("linear", "Linear"), ("nearest", "Nearest neighbour"), ("bspline", "B-spline (cubic)"),
+                    ("lanczos", "Lanczos (windowed sinc)"))
+RESAMPLING_ATTRIBUTE = NEURO_PREFIX + "ResampledMm"         # on a resampled series and its frames (mm voxels)
 # The values of an imported CT/MR's .json sidecar kept on its volume (NeuroPET.Anatomy<key>): (key, sidecar key,
 # factor to ms for the BIDS times in s); and the DICOM tag each stands for in anatomyContrast
 ANATOMY_SIDECAR_KEYS = (("Modality", "Modality", None), ("SeriesDescription", "SeriesDescription", None),
@@ -71,10 +79,11 @@ ANATOMY_SIDECAR_TAGS = (("0008,0060", "Modality"), ("0008,103e", "SeriesDescript
 PATIENT_AGE_ATTRIBUTE, PATIENT_SEX_ATTRIBUTE = NEURO_PREFIX + "PatientAge", NEURO_PREFIX + "PatientSex"
 PATIENT_NAME_ATTRIBUTE, PATIENT_ID_ATTRIBUTE = NEURO_PREFIX + "PatientName", NEURO_PREFIX + "PatientID"
 SETTINGS_REGION_ATLAS = "NeuroPET/RegionAtlas"
+SETTINGS_PET_ATLAS_DEFAULT = "NeuroPET/RegionAtlasPetDefault"   # set once the saved atlas was moved to CerebrA PET
 GROW_MM, ERODE_REFERENCE_MM = 0.0, 0.0      # defaults: regions as in the atlas
 WM_PROBABILITY_LIMIT = 0.5      # the regions grow only into voxels with a lower white matter probability
 DEFAULT_TARGET = "Putamen"
-DEFAULT_MODEL = "SRTM"
+DEFAULT_MODEL = "SRTM2"
 
 METHOD_PET, METHOD_ANATOMY, METHOD_PET_TEMPLATE = "pet", "anatomy", "petTemplate"   # the last: Static Neuro
 METHODS = ((METHOD_PET, "Register the PET to the template"),
@@ -134,7 +143,7 @@ STEPS = (
     (STEP_REG, "DynamicPETRegistration", "CT/MR registration", "The series registered to the CT / MR"),
     (STEP_NORM, None, "Normalization", "To a template space (default MNI ICBM 152 2009c)"),
     (STEP_REGIONS, None, "Regions", "Regions of a segmentation of the space (default CerebrA)"),
-    (STEP_MODEL, "DynamicPETModeling", "Modeling", "Kinetic modelling of the regions (SRTM, Logan, ...)"),
+    (STEP_MODEL, "DynamicPETModeling", "Modeling", "Kinetic modelling of the regions (SRTM2, SRTM, Logan, ...)"),
 )
 TOOLBAR_OBJECT_NAME = "DynamicNeuroPETWorkflowToolbar"
 ICON_PATH = os.path.join(_MODULE_DIR, "Resources", "Icons", "DynamicNeuroPET.png")
@@ -186,8 +195,14 @@ class NeuroWorkflowLogic(ScriptedLoadableModuleLogic):
         template = logic.loadAtlasVolume(atlas["T1"])
         result = logic.normalize(sequence, template, METHOD_PET)
         ... (a linear transform node with the chain: logic.chainNodes(result)) ...
-        segmentation, referenceId = logic.loadAtlasRegions(atlas, "CerebrA:regions")
+        segmentation, referenceId = logic.loadAtlasRegions(atlas, "CerebrA_PET:regions")
     """
+
+    # the regions a reference region is made of are left out of the regions (a reference has no result of its own:
+    # no kinetic result, no z / t score) and the reference is a region of the one labelmap layer (Slicer's layer
+    # merge on every save took minutes with an overlapping reference); Burak 2026-11-22: Static Neuro too
+    DROP_REFERENCE_REGIONS = True
+    REFERENCE_COLOR = (0.85, 0.85, 0.2)     # the reference region's segment
 
     # --- atlas -------------------------------------------------------------------------------------
     @staticmethod
@@ -202,7 +217,13 @@ class NeuroWorkflowLogic(ScriptedLoadableModuleLogic):
 
     @staticmethod
     def savedRegionAtlas():
-        key = str(qt.QSettings().value(SETTINGS_REGION_ATLAS) or "")
+        settings = qt.QSettings()
+        key = str(settings.value(SETTINGS_REGION_ATLAS) or "")
+        if not settings.contains(SETTINGS_PET_ATLAS_DEFAULT):     # once: CerebrA PET became the default (2026-11-21)
+            settings.setValue(SETTINGS_PET_ATLAS_DEFAULT, True)
+            if key == neuro.BASE_REGION_ATLAS:
+                key = neuro.DEFAULT_REGION_ATLAS
+                settings.setValue(SETTINGS_REGION_ATLAS, key)
         return key if neuro.isRegionAtlasKey(key) else neuro.DEFAULT_REGION_ATLAS
 
     @staticmethod
@@ -335,6 +356,52 @@ class NeuroWorkflowLogic(ScriptedLoadableModuleLogic):
             node.SetAttribute(SMOOTHING_ATTRIBUTE, text)
         sequence.SetAttribute(SMOOTHING_ATTRIBUTE, text)
         logging.info(f"Neuro: '{sequence.GetName()}' smoothed ({text} mm FWHM, {len(nodes)} images)")
+
+    @staticmethod
+    def resampleSeries(sequence, spacingMm, method="linear", progress=None):
+        """Every frame of the series and its summed image resampled in place to isotropic voxels of spacingMm over
+        the same extent (same direction; normaldb.resampledGrid); marks them (RESAMPLING_ATTRIBUTE). method: a
+        RESAMPLE_METHODS key. progress(index, total) is called before each image. One image at a time and no copy of
+        the original kept (the series is overwritten: load it again to undo)."""
+        import SimpleITK as sitk
+        from DynamicPETRegistration import DynamicPETRegistrationLogic
+        interpolators = {"linear": sitk.sitkLinear, "nearest": sitk.sitkNearestNeighbor,
+                         "bspline": sitk.sitkBSpline, "lanczos": sitk.sitkLanczosWindowedSinc}
+        if method not in interpolators:
+            raise ValueError(f"Unknown resampling method {method!r}")
+        spacingMm = float(spacingMm)
+        summed = DynamicPETRegistrationLogic.summedVolumeOf(sequence)
+        nodes = [sequence.GetNthDataNode(i) for i in range(sequence.GetNumberOfDataNodes())]
+        nodes += [summed] if summed is not None else []
+        text = f"{spacingMm:g}"
+        for index, node in enumerate(nodes):
+            if progress is not None:
+                progress(index, len(nodes))
+            # resampled along the image axes (index space in mm, origin at the first voxel), then placed back with
+            # the node's own direction: no RAS / LPS conversion
+            spacing = tuple(float(v) for v in node.GetSpacing())
+            image = sitk.GetImageFromArray(slicer.util.arrayFromVolume(node))
+            image.SetSpacing(spacing)
+            size, shift = normaldb.resampledGrid(image.GetSize(), spacing, spacingMm)
+            out = sitk.Resample(image, [int(v) for v in size], sitk.Transform(), interpolators[method],
+                                [float(v) for v in shift], (spacingMm,) * 3, image.GetDirection(), 0.0,
+                                image.GetPixelID())
+            del image
+            matrix = vtk.vtkMatrix4x4()
+            node.GetIJKToRASMatrix(matrix)
+            ijkToRas = slicer.util.arrayFromVTKMatrix(matrix)
+            direction = ijkToRas[:3, :3] / np.array(spacing)
+            origin = ijkToRas[:3, 3] + direction @ np.array(shift, dtype=float)
+            array = sitk.GetArrayFromImage(out)
+            del out
+            slicer.util.updateVolumeFromArray(node, array)
+            del array
+            node.SetSpacing(spacingMm, spacingMm, spacingMm)
+            node.SetOrigin(*(float(v) for v in origin))
+            node.SetAttribute(RESAMPLING_ATTRIBUTE, text)
+        sequence.SetAttribute(RESAMPLING_ATTRIBUTE, text)
+        sequence.Modified()
+        logging.info(f"Neuro: '{sequence.GetName()}' resampled to {text} mm voxels ({method}, {len(nodes)} images)")
 
     @staticmethod
     def readSidecar(path):
@@ -798,7 +865,7 @@ class NeuroWorkflowLogic(ScriptedLoadableModuleLogic):
             pass
         structures = neuro.readCerebraLabels(table)
         layers, ijkToRas, segments = neuro.readSegmentationFile(source)
-        labels, unknown = neuro.segmentationLabels(layers, segments, structures)
+        labels, unknown = neuro.segmentationLabels(layers, segments, structures, ijkToRas)
         if unknown:
             logging.warning(f"Neuro: segments of {source} not in its labels.csv: " + ", ".join(unknown))
         if not labels.any():
@@ -839,7 +906,7 @@ class NeuroWorkflowLogic(ScriptedLoadableModuleLogic):
     def loadRegions(self, labelsPath, entries, referencePath=None, referenceName=None, referenceEntries=None,
                     name=REGIONS_NAME, overlayPath=None, referenceOverlayPath=None, growMm=0.0, erodeReferenceMm=0.0,
                     allowedMask=None, target=None, referenceMaskPath=None, referenceGroups=(),
-                    referenceMaskArray=None):
+                    referenceMaskArray=None, dropReferenceRegions=None, referenceMembers=None):
         """A segmentation of the atlas labels (labelsPath, entries [(value, name, color)]) with their names. The
         reference region referenceName comes from referencePath (another version of the atlas on the same grid, e.g.
         the bilateral one, with its referenceEntries) as a segment of its own, or, when referencePath is labelsPath
@@ -854,7 +921,11 @@ class NeuroWorkflowLogic(ScriptedLoadableModuleLogic):
         referenceGroups: the reference-only regions of the atlas [(name, members)] (neuro.referenceGroups; 'Cerebellum
         Whole' of the broad regions), made from all their members. referenceMaskArray: the reference region as a
         boolean array on the atlas grid (the centrum semiovale of the space, whiteMatterReferenceMask), eroded by
-        erodeReferenceMm. Returns
+        erodeReferenceMm. dropReferenceRegions: the regions the reference is made of left out and the reference a
+        region of the label map (one layer; None: DROP_REFERENCE_REGIONS), else the reference a segment overlapping
+        the regions; never when those regions would be most of the regions (a whole-brain reference). The members:
+        the regions at least half in the reference before erosion; with referenceMaskPath, in the region
+        referenceMembers of the reference atlas (the atlas region the mask is made of; else in the mask). Returns
         (segmentation node, reference segment ID or None). The regions are made in a new segmentation and only on
         success copied into target: a failure (an empty reference region, another grid) leaves target as it was and
         no new segmentation behind."""
@@ -887,14 +958,94 @@ class NeuroWorkflowLogic(ScriptedLoadableModuleLogic):
                     allowed = ~overlayMask if allowed is None else (np.asarray(allowed, dtype=bool) & ~overlayMask)
                 remapped = neuro.growLabels(remapped, growMm, spacing, allowed,
                                             neuro.fixedValuesOf(entries)).astype(np.int16)
+            if overlayMask is not None and overlayMask.any():
+                # the overlapping structures that are regions here (the pons) in the label map itself: one layer
+                remapped = np.where(overlayMask, overlay, remapped).astype(np.int16)
+            # the reference region: (mask, the mask its member regions are found by, title); None when the reference
+            # is a region as it is (its own segment)
+            reference = None
+            referenceTitle = (referenceName or "Reference") + REFERENCE_SUFFIX
+            if referenceMaskPath:
+                referenceArray, referenceNode = self._loadLabels(referenceMaskPath)
+                if referenceArray.shape != array.shape:
+                    raise ValueError("The reference mask is not on the grid of the region atlas (MNI 2009c 1 mm).")
+                if not (referenceArray > 0).any():
+                    raise ValueError("The reference mask is empty.")
+                members = self._atlasRegionMask(referenceMembers, labelsPath, entries, original, referencePath,
+                                                referenceEntries, referenceGroups) if referenceMembers else None
+                reference = (referenceArray > 0, members if members is not None else referenceArray > 0)
+            elif referenceMaskArray is not None:
+                if np.shape(referenceMaskArray) != array.shape:
+                    raise ValueError("The reference region is not on the grid of the region atlas.")
+                members = np.asarray(referenceMaskArray, dtype=bool)
+                reference = (neuro.erodeMask(members, erodeReferenceMm, spacing), members)
+            elif referenceName:
+                sameAtlas = referencePath is None or os.path.normcase(os.path.abspath(referencePath)) == \
+                    os.path.normcase(os.path.abspath(labelsPath))
+                referenceValue = self.entryValue(entries if sameAtlas else (referenceEntries or ()), referenceName)
+                # a reference-only region (no segment of its own): all the label values of its members
+                unionValues = [] if referenceValue is not None else neuro.referenceRegionValues(
+                    entries if sameAtlas else (referenceEntries or ()), referenceName, referenceGroups)
+                if sameAtlas and erodeReferenceMm <= 0 and growMm <= 0 and not unionValues:
+                    if referenceValue is None:
+                        raise ValueError(f"No region '{referenceName}' in the atlas.")
+                elif sameAtlas:
+                    # the reference of the atlas as drawn (not grown), eroded
+                    if referenceValue is None and not unionValues:
+                        raise ValueError(f"No region '{referenceName}' in the atlas.")
+                    members = np.isin(original, unionValues or [referenceValue])
+                    if not members.any() and overlayPath:
+                        referenceOverlay, overlayNode = self._loadLabels(overlayPath)
+                        members = np.isin(referenceOverlay, unionValues or [referenceValue])
+                    reference = (neuro.erodeMask(members, erodeReferenceMm, spacing), members)
+                else:
+                    referenceArray, referenceNode = self._loadLabels(referencePath)
+                    if referenceArray.shape != array.shape:
+                        raise ValueError("The reference atlas is not on the grid of the region atlas.")
+                    if referenceValue is None and not unionValues:
+                        raise ValueError(f"No region '{referenceName}' in the reference atlas.")
+                    members = np.isin(referenceArray, unionValues or [referenceValue])
+                    if not members.any() and referenceOverlayPath:      # an overlapping structure (pons)
+                        referenceOverlay, overlayNode = self._loadLabels(referenceOverlayPath)
+                        if referenceOverlay.shape == array.shape:
+                            members = np.isin(referenceOverlay, unionValues or [referenceValue])
+                    reference = (neuro.erodeMask(members, erodeReferenceMm, spacing), members)
+            regionEntries = list(entries)
+            removed = []
+            drop = self.DROP_REFERENCE_REGIONS if dropReferenceRegions is None else bool(dropReferenceRegions)
+            if reference is not None and drop:
+                referenceMask, members = reference
+                if not referenceMask.any():
+                    raise ValueError(f"The reference region '{referenceName}' is empty (eroded too much?).")
+                # Burak 2026-11-22: the regions the reference is made of are left out (a reference region has no
+                # result of its own), and the reference is a region of the label map, not an overlapping segment:
+                # one labelmap layer, else Slicer merges the layers on every save and the segment events of that
+                # merge took minutes. A region at least half in the reference is one of its members; the few
+                # voxels of other regions under the reference go to the reference.
+                withPons = np.where(overlayMask, overlay, original) if overlayMask is not None else original
+                counts = np.bincount(withPons.ravel().astype(np.int64))
+                inside = np.bincount(withPons[members].astype(np.int64), minlength=len(counts))
+                removed = [v for v in range(1, len(counts)) if counts[v] and inside[v] * 2 >= counts[v]]
+                if removed and int(counts[removed].sum()) * 2 > int(counts[1:].sum()):
+                    # a whole-brain (global) reference: the regions stay, the reference overlaps them
+                    logging.info(f"Neuro: the reference '{referenceName}' covers most regions: they are kept")
+                    drop, removed = False, []
+            if reference is not None and drop:
+                referenceMask, members = reference
+                if removed:
+                    remapped = np.where(np.isin(remapped, removed), 0, remapped).astype(np.int16)
+                referenceValue = int(max(max(values), int(remapped.max()))) + 1
+                remapped[referenceMask] = referenceValue
+                regionEntries = [e for e in entries if e[0] not in removed]
+                regionEntries.append((referenceValue, referenceTitle, tuple(self.REFERENCE_COLOR)))
             colorNode = scene.AddNewNodeByClass("vtkMRMLColorTableNode", scene.GenerateUniqueName("CerebrA colors"))
             colorNode.SetTypeToUser()
-            top = max(values) + 1
+            top = max(v for v, _, _ in regionEntries) + 1
             colorNode.SetNumberOfColors(top)
             colorNode.SetColor(0, "Background", 0.0, 0.0, 0.0, 0.0)
             for value in range(1, top):
                 colorNode.SetColor(value, "", 0.0, 0.0, 0.0, 0.0)
-            for value, label, (r, g, b) in entries:
+            for value, label, (r, g, b) in regionEntries:
                 colorNode.SetColor(value, label, r, g, b, 1.0)
             labelNode = scene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "CerebrA labels")
             labelNode.SetIJKToRASMatrix(_vtkMatrix(_ijkToRas(source)))
@@ -906,67 +1057,22 @@ class NeuroWorkflowLogic(ScriptedLoadableModuleLogic):
             segmentation.SetReferenceImageGeometryParameterFromVolumeNode(labelNode)
             if not slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(labelNode, segmentation):
                 raise RuntimeError("Could not make the CerebrA segmentation")
-            self._nameSegments(segmentation, entries)
-            if overlay is not None:
-                present = set(np.unique(overlay).tolist()) - {0}
-                for value, label, color in entries:
-                    if value in present and self.segmentIdByName(segmentation, label) is None:
-                        self._addMaskSegment(segmentation, overlay == value, labelNode, label, color)
+            self._nameSegments(segmentation, regionEntries)
             referenceId = None
-            if referenceMaskPath:
-                referenceArray, referenceNode = self._loadLabels(referenceMaskPath)
-                if referenceArray.shape != array.shape:
-                    raise ValueError("The reference mask is not on the grid of the region atlas (MNI 2009c 1 mm).")
-                if not (referenceArray > 0).any():
-                    raise ValueError("The reference mask is empty.")
-                referenceId = self._addMaskSegment(segmentation, referenceArray > 0, labelNode,
-                                                   (referenceName or "Reference") + REFERENCE_SUFFIX,
-                                                   (0.85, 0.85, 0.2))
-            elif referenceMaskArray is not None:
-                if np.shape(referenceMaskArray) != array.shape:
-                    raise ValueError("The reference region is not on the grid of the region atlas.")
-                referenceMask = neuro.erodeMask(referenceMaskArray, erodeReferenceMm, spacing)
-                if not referenceMask.any():
+            if reference is not None and not drop:
+                # the regions stay whole, the reference overlaps them (a labelmap layer of its own)
+                if not reference[0].any():
                     raise ValueError(f"The reference region '{referenceName}' is empty (eroded too much?).")
-                referenceId = self._addMaskSegment(segmentation, referenceMask, labelNode,
-                                                   (referenceName or "Reference") + REFERENCE_SUFFIX,
-                                                   (0.85, 0.85, 0.2))
+                referenceId = self._addMaskSegment(segmentation, reference[0], labelNode, referenceTitle,
+                                                   tuple(self.REFERENCE_COLOR))
+            elif reference is not None:
+                referenceId = self.segmentIdByName(segmentation, referenceTitle)
+                if removed:
+                    names = [n for v, n, _ in entries if v in removed]
+                    logging.info(f"Neuro: the regions of the reference '{referenceName}' left out: "
+                                 + ", ".join(names or [str(v) for v in removed]))
             elif referenceName:
-                sameAtlas = referencePath is None or os.path.normcase(os.path.abspath(referencePath)) == \
-                    os.path.normcase(os.path.abspath(labelsPath))
-                referenceValue = self.entryValue(entries if sameAtlas else (referenceEntries or ()), referenceName)
-                # a reference-only region (no segment of its own): all the label values of its members
-                unionValues = [] if referenceValue is not None else neuro.referenceRegionValues(
-                    entries if sameAtlas else (referenceEntries or ()), referenceName, referenceGroups)
-                if sameAtlas and erodeReferenceMm <= 0 and growMm <= 0 and not unionValues:
-                    referenceId = self.segmentIdByName(segmentation, referenceName)
-                elif sameAtlas:
-                    # the reference of the atlas as drawn (not grown), eroded: a segment of its own
-                    if referenceValue is None and not unionValues:
-                        raise ValueError(f"No region '{referenceName}' in the atlas.")
-                    referenceMask = np.isin(original, unionValues or [referenceValue])
-                    if not referenceMask.any() and overlayPath:
-                        overlay, overlayNode = self._loadLabels(overlayPath)
-                        referenceMask = np.isin(overlay, unionValues or [referenceValue])
-                    referenceId = self._addMaskSegment(
-                        segmentation, neuro.erodeMask(referenceMask, erodeReferenceMm, spacing), labelNode,
-                        referenceName + REFERENCE_SUFFIX, (0.85, 0.85, 0.2))
-                else:
-                    referenceArray, referenceNode = self._loadLabels(referencePath)
-                    if referenceArray.shape != array.shape:
-                        raise ValueError("The reference atlas is not on the grid of the region atlas.")
-                    if referenceValue is None and not unionValues:
-                        raise ValueError(f"No region '{referenceName}' in the reference atlas.")
-                    referenceMask = np.isin(referenceArray, unionValues or [referenceValue])
-                    if not referenceMask.any() and referenceOverlayPath:      # an overlapping structure (pons)
-                        overlay, overlayNode = self._loadLabels(referenceOverlayPath)
-                        if overlay.shape == array.shape:
-                            referenceMask = np.isin(overlay, unionValues or [referenceValue])
-                    referenceMask = neuro.erodeMask(referenceMask, erodeReferenceMm, spacing)
-                    if not referenceMask.any():
-                        raise ValueError(f"The reference region '{referenceName}' is empty (eroded too much?).")
-                    referenceId = self._addMaskSegment(segmentation, referenceMask, labelNode,
-                                                       referenceName + REFERENCE_SUFFIX, (0.85, 0.85, 0.2))
+                referenceId = self.segmentIdByName(segmentation, referenceName)
             if target is not None and scene.IsNodePresent(target):
                 referenceId = self._replaceSegments(target, segmentation, labelNode, referenceId)
                 scene.RemoveNode(segmentation)
@@ -991,21 +1097,20 @@ class NeuroWorkflowLogic(ScriptedLoadableModuleLogic):
     @staticmethod
     def _replaceSegments(target, source, referenceVolume, referenceId=None):
         """The segments of target replaced by copies of those of source (same IDs, names and colors); returns the
-        ID the segment referenceId of source has in target."""
+        ID the segment referenceId of source has in target. One deep copy of the whole segmentation keeps the shared
+        labelmap layers: copying the segments one by one gave every segment a full-size layer of its own (RAM x 4-5
+        when loading regions over the earlier segmentation, then minutes merging them back on the next save)."""
         referenceName = None
         if referenceId and source.GetSegmentation().GetSegment(referenceId) is not None:
             referenceName = source.GetSegmentation().GetSegment(referenceId).GetName()
         wasModifying = target.StartModify()
         try:
             segmentation = target.GetSegmentation()
-            segmentation.RemoveAllSegments()
+            segmentation.DeepCopy(source.GetSegmentation())       # all segments, layers shared as in source
             target.CreateDefaultDisplayNodes()
             target.SetReferenceImageGeometryParameterFromVolumeNode(referenceVolume)
-            fromSegmentation = source.GetSegmentation()
-            for index in range(fromSegmentation.GetNumberOfSegments()):
-                segmentId = fromSegmentation.GetNthSegmentID(index)
-                if not segmentation.CopySegmentFromSegmentation(fromSegmentation, segmentId):
-                    raise RuntimeError(f"Could not copy the segment {segmentId}")
+            if segmentation.GetNumberOfSegments() != source.GetSegmentation().GetNumberOfSegments():
+                raise RuntimeError("Could not copy the segments")
         finally:
             target.EndModify(wasModifying)
         if referenceId and target.GetSegmentation().GetSegment(referenceId) is None and referenceName:
@@ -1018,6 +1123,28 @@ class NeuroWorkflowLogic(ScriptedLoadableModuleLogic):
             if entryName.strip().lower() == name.strip().lower():
                 return value
         return None
+
+    def _atlasRegionMask(self, name, labelsPath, entries, labels, referencePath=None, referenceEntries=None,
+                         referenceGroups=()):
+        """The voxels of the region 'name' (a reference-only group: all its members) as drawn in the reference atlas
+        (referencePath with referenceEntries; labelsPath's labels, entries when it is the same or None), on the grid
+        of labels; None when there is no such region or it is empty there."""
+        sameAtlas = referencePath is None or os.path.normcase(os.path.abspath(referencePath)) == \
+            os.path.normcase(os.path.abspath(labelsPath))
+        pool = entries if sameAtlas else (referenceEntries or ())
+        value = self.entryValue(pool, name)
+        wanted = [value] if value is not None else list(neuro.referenceRegionValues(pool, name, referenceGroups) or ())
+        if not wanted:
+            return None
+        if sameAtlas:
+            found = np.isin(labels, wanted)
+        else:
+            array, node = self._loadLabels(referencePath)
+            slicer.mrmlScene.RemoveNode(node)
+            if array.shape != np.shape(labels):
+                return None
+            found = np.isin(array, wanted)
+        return found if found.any() else None
 
     def growthMask(self, atlas, growInto=normaldb.GROW_NO_WM):
         """Voxels the regions may grow into, by growInto (normaldb.GROW_*): in the MNI brain mask and outside the
@@ -1054,14 +1181,14 @@ class NeuroWorkflowLogic(ScriptedLoadableModuleLogic):
 
     def loadAtlasRegions(self, atlas, targetKind=None, referenceKind=None, referenceName=None, growMm=GROW_MM,
                          erodeReferenceMm=ERODE_REFERENCE_MM, growInto=normaldb.GROW_NO_WM, target=None,
-                         referenceMaskPath=None):
+                         referenceMaskPath=None, dropReferenceRegions=None, referenceMembers=None):
         """Regions of a region atlas (targetKind: a key of neuro.regionAtlasKey, a segmentation and a grouping;
         default the default segmentation's regions), the reference region (referenceName, default the cerebellar grey
         matter) from referenceKind (default: the same atlas with the sides merged). atlas: the volumes of the space
         (neuro.atlasFiles; its brain mask and white matter map limit the growth). The label maps of the groupings
         are made on first use. growInto (normaldb.GROW_*): the grown regions stay out of the white matter, may take it
         too, or only take white matter voxels (growthMask). target: a segmentation to fill instead of a new one.
-        Returns (segmentation, reference segment ID)."""
+        dropReferenceRegions, referenceMembers: see loadRegions. Returns (segmentation, reference segment ID)."""
         targetKind = targetKind or neuro.DEFAULT_REGION_ATLAS
         referenceKind = referenceKind or neuro.mergedRegionAtlas(targetKind)
         labelsPath, entries = self.regionAtlasPaths(targetKind)
@@ -1070,20 +1197,33 @@ class NeuroWorkflowLogic(ScriptedLoadableModuleLogic):
             referenceName = defaultReferenceName(referenceEntries)
         referenceMask = None
         if not referenceMaskPath and neuro.isWhiteMatterReference(referenceName):
-            referenceMask = self.whiteMatterReferenceMask(atlas)[0]
+            referenceMask = self.whiteMatterReferenceMask(atlas, targetKind)[0]
         allowed = self.growthMask(atlas, growInto) if growMm > 0 else None
         return self.loadRegions(labelsPath, entries, referencePath, referenceName, referenceEntries, growMm=growMm,
                                 erodeReferenceMm=erodeReferenceMm, allowedMask=allowed, target=target,
                                 referenceMaskPath=referenceMaskPath,
-                                referenceGroups=neuro.referenceGroups(referenceKind), referenceMaskArray=referenceMask)
+                                referenceGroups=neuro.referenceGroups(referenceKind), referenceMaskArray=referenceMask,
+                                dropReferenceRegions=dropReferenceRegions, referenceMembers=referenceMembers)
 
-    def whiteMatterReferenceMask(self, atlas):
-        """(mask, label map path) of the centrum semiovale (neuro.WHITE_MATTER_REFERENCE) on the grid of the default
-        region atlas (CerebrA: its regions and lateral ventricles), from the white matter map (WM) and the brain mask
-        of the space (atlas: neuro.atlasFiles). The same whatever region atlas is picked."""
+    def whiteMatterReferenceMask(self, atlas, regionAtlas=None):
+        """(mask, label map path) of the centrum semiovale (neuro.WHITE_MATTER_REFERENCE): the one drawn in the
+        segmentation of regionAtlas (a region atlas key, default the default one) when it has a 'Centrum Semiovale'
+        segment (CerebrA, CerebrA PET), on the grid of its label map; else from the white matter map (WM) and the
+        brain mask of the space (atlas: neuro.atlasFiles) on the grid of the base region atlas (CerebrA: its regions
+        and lateral ventricles)."""
+        segmentationId = neuro.splitRegionAtlas(regionAtlas or neuro.DEFAULT_REGION_ATLAS)[0]
+        drawn = neuro.drawnWhiteMatterReference(neuro.segmentationInfo(segmentationId))
+        if drawn is not None:
+            labelsPath, _ = self.regionAtlasPaths(neuro.regionAtlasKey(segmentationId, neuro.REGIONS))
+            labels, labelNode = self._loadLabels(labelsPath)
+            slicer.mrmlScene.RemoveNode(labelNode)
+            if np.shape(labels) == drawn[0].shape:
+                return drawn[0], labelsPath
+            logging.warning(f"Neuro: the centrum semiovale drawn in {segmentationId} is not on its label map grid; "
+                            "made from the white matter map instead")
         if "WM" not in (atlas or {}):
             raise ValueError("The centrum semiovale needs the white matter probability map (WM) of the space.")
-        labelsPath, entries = self.regionAtlasPaths(neuro.DEFAULT_REGION_ATLAS)
+        labelsPath, entries = self.regionAtlasPaths(neuro.BASE_REGION_ATLAS)
         labels, labelNode = self._loadLabels(labelsPath)
         try:
             ijkToRas = _ijkToRas(labelNode)
@@ -1303,9 +1443,20 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.addObserver(slicer.mrmlScene, event, lambda caller, event: self._refreshLater())
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneClose)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneClosed)
+        self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartSaveEvent, self.onSceneSave)
         self.refreshAtlasLibrary(save=False)
         self.selectInputs()
-        self.showStep(STEP_DATA, enterStep=False)
+        # a scene loaded before the panel was made (or a developer reload): the step it was saved on, else Data
+        saved = scenestate.parameterNode(self.MODULE_NAME)
+        saved = saved.GetParameter(scenestate.STEP_PARAMETER) if saved is not None else ""
+        self._holdStep = True
+        try:
+            self.showStep(STEP_DATA, enterStep=False)
+        finally:
+            self._holdStep = False
+        if saved and saved != STEP_DATA:      # once the subclass' setup has made its pages too
+            qt.QTimer.singleShot(0, lambda: self.restoreFromScene(saved))
+        scenestate.install(self.MODULE_NAME, self.registerLayouts, self.LAYOUT_STEPS)
 
     # --- workflow toolbar ------------------------------------------------------------------------------
     def _stepButton(self, index, key, title, explanation):
@@ -1479,6 +1630,36 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         smoothRow.addWidget(self.smoothCheck)
         smoothRow.addWidget(self.smoothFwhmSpin)
         form.addRow("Smoothing:", smoothRow)
+        resampleRow = qt.QHBoxLayout()
+        self.resampleCheck = qt.QCheckBox("Resample to")
+        self.resampleCheck.toolTip = ("Every frame and the summed image are resampled in place to isotropic voxels of "
+                                      "this size when you go on from this step (after the smoothing when both are on), "
+                                      "before the motion correction. Larger voxels use less memory and make every "
+                                      "later step faster. Done once per series; load it again to undo.")
+        self.resampleSpin = qt.QDoubleSpinBox()
+        self.resampleSpin.setRange(0.5, 10.0)
+        self.resampleSpin.setDecimals(2)
+        self.resampleSpin.singleStep = 0.25
+        self.resampleSpin.suffix = " mm"
+        try:
+            self.resampleSpin.value = float(qt.QSettings().value(SETTINGS_RESAMPLE_MM) or DEFAULT_RESAMPLE_MM)
+        except (TypeError, ValueError):
+            self.resampleSpin.value = DEFAULT_RESAMPLE_MM
+        self.resampleSpin.toolTip = "Voxel size of the resampled series (the same in every direction)"
+        self.resampleMethodCombo = qt.QComboBox()
+        for key, title in RESAMPLE_METHODS:
+            self.resampleMethodCombo.addItem(title, key)
+        index = self.resampleMethodCombo.findData(qt.QSettings().value(SETTINGS_RESAMPLE_METHOD) or "linear")
+        self.resampleMethodCombo.setCurrentIndex(max(0, index))
+        self.resampleMethodCombo.toolTip = "Interpolation of the resampling (default linear)"
+        resampleRow.addWidget(self.resampleCheck)
+        resampleRow.addWidget(self.resampleSpin)
+        resampleRow.addWidget(self.resampleMethodCombo, 1)
+        form.addRow("Resampling:", resampleRow)
+        self.resampleInfo = qt.QLabel()
+        self.resampleInfo.wordWrap = True
+        self.resampleInfo.setStyleSheet("color: #7d868d")
+        form.addRow("", self.resampleInfo)
         self.anatomySelector = self._nodeSelector(["vtkMRMLScalarVolumeNode"],
                                                   "CT or MR of the same patient (registration in step 3, and the "
                                                   "normalization through the CT/MR in step 4)")
@@ -1501,7 +1682,7 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         layout.addWidget(dicomButton)
         note = qt.QLabel("This workflow is for dynamic receptor imaging of the brain: the series is motion corrected, "
                          "registered to the CT/MR, normalized to a template space (default MNI ICBM 152 2009c), and "
-                         "the regions of a segmentation (default CerebrA) are modelled (SRTM with the cerebellar grey "
+                         "the regions of a segmentation (default CerebrA) are modelled (SRTM2 with the cerebellar grey "
                          "matter as the reference by default). Steps can be skipped.")
         note.wordWrap = True
         note.setStyleSheet("color: #7d868d")
@@ -1513,7 +1694,54 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.smoothCheck.connect("toggled(bool)", lambda on: self._syncSmoothing())
         self.smoothFwhmSpin.connect("valueChanged(double)",
                                     lambda v: qt.QSettings().setValue(SETTINGS_SMOOTH_FWHM, float(v)))
+        self.resampleCheck.connect("toggled(bool)", lambda on: self._syncResampling())
+        self.resampleSpin.connect("valueChanged(double)", self._onResampleSpacingChanged)
+        self.resampleMethodCombo.connect("currentIndexChanged(int)", lambda i: qt.QSettings().setValue(
+            SETTINGS_RESAMPLE_METHOD, self.resampleMethodCombo.currentData))
+        self._syncResampling()
         return page
+
+    def _onResampleSpacingChanged(self, value):
+        qt.QSettings().setValue(SETTINGS_RESAMPLE_MM, float(value))
+        self._syncResampling()
+
+    def _syncResampling(self):
+        """The resampling row and its sizes: the series' first frame now and after resampling (a resampled series
+        shows its voxel size, fixed)."""
+        if not hasattr(self, "resampleCheck"):
+            return
+        sequence = self.sequence()
+        done = sequence.GetAttribute(RESAMPLING_ATTRIBUTE) if sequence is not None else None
+        self.resampleCheck.blockSignals(True)
+        try:
+            if done:
+                self.resampleCheck.checked = True
+            elif not self.resampleCheck.enabled:        # was showing another (resampled) series
+                self.resampleCheck.checked = False
+        finally:
+            self.resampleCheck.blockSignals(False)
+        self.resampleCheck.enabled = sequence is not None and not done
+        on = self.resampleCheck.enabled and self.resampleCheck.checked
+        self.resampleSpin.enabled = self.resampleMethodCombo.enabled = on
+        frame = sequence.GetNthDataNode(0) if sequence is not None and sequence.GetNumberOfDataNodes() else None
+        image = frame.GetImageData() if frame is not None else None
+        if image is None:
+            self.resampleInfo.text = ""
+            return
+        dims, spacing = image.GetDimensions(), frame.GetSpacing()
+        frames = sequence.GetNumberOfDataNodes()
+
+        def describe(size, step):
+            megabytes = float(np.prod(size)) * 4 * frames / 1024.0 ** 2
+            return (" x ".join(str(int(n)) for n in size) + " voxels of "
+                    + " x ".join(f"{float(s):.3g}" for s in step) + f" mm (float: about {megabytes:,.0f} MB for "
+                    f"{frames} frames)")
+
+        text = ("Resampled: " if done else "Now: ") + describe(dims, spacing)
+        if on:
+            size, _ = normaldb.resampledGrid(dims, spacing, self.resampleSpin.value)
+            text += "<br>After: " + describe(size, (self.resampleSpin.value,) * 3)
+        self.resampleInfo.text = text
 
     def _syncSmoothing(self):
         """The smoothing row: a smoothed series shows its FWHM (fixed), another one the user's choice."""
@@ -1541,8 +1769,41 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.smoothFwhmSpin.enabled = self.smoothCheck.enabled and self.smoothCheck.checked
 
     def _applyDataSmoothing(self):
-        """Leaving the Data step with 'Smooth the series' on: the series smoothed in place (once). False when it
-        failed (the step stays)."""
+        """Leaving the Data step: the series smoothed ('Smooth the series'), then resampled ('Resample to') in place,
+        each once. False when it failed (the step stays)."""
+        return self._smoothData() and self._resampleData()
+
+    def _resampleData(self):
+        if not hasattr(self, "resampleCheck") or not self.resampleCheck.checked:
+            return True
+        sequence = self.sequence()
+        if sequence is None or sequence.GetAttribute(RESAMPLING_ATTRIBUTE):
+            return True
+        spacing = float(self.resampleSpin.value)
+        method = self.resampleMethodCombo.currentData
+        dialog = slicer.util.createProgressDialog(windowTitle=self.TOOLBAR_TITLE,
+                                                  labelText=f"Resampling the series ({spacing:g} mm)...", maximum=0)
+
+        def progress(index, total):
+            dialog.maximum = total
+            dialog.setValue(index)
+            slicer.app.processEvents()
+
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        try:
+            self.logic.resampleSeries(sequence, spacing, method, progress)
+        except Exception as error:
+            logging.exception("Neuro: resampling failed")
+            slicer.util.errorDisplay(f"Could not resample the series:\n{error}")
+            return False
+        finally:
+            qt.QApplication.restoreOverrideCursor()
+            dialog.close()
+            dialog.deleteLater()
+        self._updateDataInfo()
+        return True
+
+    def _smoothData(self):
         if not hasattr(self, "smoothCheck") or not self.smoothCheck.checked:
             return True
         sequence = self.sequence()
@@ -1812,6 +2073,7 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def _updateDataInfo(self):
         self._syncPatientFields()
         self._syncSmoothing()
+        self._syncResampling()
         sequence = self.sequence()
         if sequence is None:
             self.sequenceInfo.text = "Pick the dynamic PET series, or import it from a file."
@@ -1825,6 +2087,8 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 done.append(f"registered to '{sequence.GetAttribute(REG_PREFIX + 'Fixed')}'")
             if sequence.GetAttribute(NEURO_PREFIX + "Template"):
                 done.append("normalized")
+            if sequence.GetAttribute(RESAMPLING_ATTRIBUTE):
+                done.insert(0, f"resampled ({sequence.GetAttribute(RESAMPLING_ATTRIBUTE)} mm voxels)")
             if sequence.GetAttribute(SMOOTHING_ATTRIBUTE):
                 done.insert(0, f"smoothed ({sequence.GetAttribute(SMOOTHING_ATTRIBUTE)} mm FWHM)")
             self.sequenceInfo.text = (f"{sequence.GetNumberOfDataNodes()} frames"
@@ -2624,6 +2888,7 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             qt.QApplication.restoreOverrideCursor()
         self._clearNormalization()
         self.normUndo = {"undo": undo, "previous": sequence, "anatomy": normalizedAnatomy}
+        self.releaseEarlierUndo(STEP_NORM)
         self.setNode("Sequence", newSequence)
         self.setNode("NormalizedAnatomy", normalizedAnatomy)
         self.normLabel.text = (description + ".\n"
@@ -2635,6 +2900,7 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._showNormalized(newSequence, template)
         self._updateNormButtons()
         self.refresh()
+        return True
 
     def _hardenNormalization(self, sequence, template, choice, description, method):
         """logic.harden() of the pending normalization with the Harden dialog's choice."""
@@ -2708,9 +2974,10 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.referenceRegionCombo = qt.QComboBox()
         self.referenceRegionCombo.toolTip = ("Reference region of the reference tissue models (no specific binding; "
                                              "the cerebellar grey matter by default): a region of the regions above, "
-                                             "both sides together, or the centrum semiovale (white matter above the "
-                                             "lateral ventricles, white matter probability >= 0.9; for tracers that "
-                                             "bind in all grey matter such as [11C]UCB-J; erode it a few mm)")
+                                             "both sides together, or the centrum semiovale (drawn in the segmentation "
+                                             "for CerebrA and CerebrA PET, else the white matter above the lateral "
+                                             "ventricles with white matter probability >= 0.9; for tracers that bind "
+                                             "in all grey matter such as [11C]UCB-J; erode it a few mm)")
         form.addRow("Reference region:", self.referenceRegionCombo)
         # the atlas the regions come from: references to cite and license (read only)
         self.regionsCredits = credits.infoBox()
@@ -2764,7 +3031,7 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def regionAtlasKey(self):
         """The region atlas picked (neuro.regionAtlasKey: segmentation and grouping)."""
-        return neuro.regionAtlasKey(self.segmentationCombo.currentData or neuro.DEFAULT_SEGMENTATION,
+        return neuro.regionAtlasKey(self.segmentationCombo.currentData or neuro.DEFAULT_REGION_SEGMENTATION,
                                     self.groupingCombo.currentData or neuro.REGIONS)
 
     def setRegionAtlas(self, key):
@@ -2830,7 +3097,9 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # the regions, then the reference-only regions of the groups table (Cerebellum Whole)
         names = sorted(n for _, n, _ in entries)
         names += [n for n in neuro.referenceRegionNames(entries, references) if n not in names]
-        if entries and "WM" in (self.atlas or neuro.atlasFiles(self.spaceId())):
+        drawn = any(neuro.isWhiteMatterSegment(n) for n in names)     # the region 'Centrum Semiovale'
+        if entries and "WM" in (self.atlas or neuro.atlasFiles(self.spaceId())) and \
+                (not drawn or neuro.isWhiteMatterReference(current)):
             names.append(neuro.WHITE_MATTER_REFERENCE)       # of the space: for tracers binding in all grey matter
         key = (kind, tuple(names))
         if getattr(self, "_referenceKey", None) == key:
@@ -2952,8 +3221,9 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     @staticmethod
     def _setRegRigidOnly(widget, on):
-        """The CT/MR registration step: the patient's own CT/MR, iterative rigid only (the embedded PET4D panel's other
-        engines and stages hidden while the step is shown; the standalone module keeps them)."""
+        """The CT/MR registration step: the patient's own CT/MR, iterative, rigid by default (affine selectable; the
+        embedded PET4D panel's other engines and the deformable passes hidden while the step is shown; the
+        standalone module keeps them)."""
         setRigidOnly = getattr(widget, "setRigidOnly", None)
         if callable(setRigidOnly):
             try:
@@ -3011,6 +3281,11 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 widget.fixedSelector.setCurrentNode(self.anatomy())
             if key == STEP_MODEL:
                 self._prepareModeling(widget)
+                # a scene loaded with fitted regions: the fit made again with its saved settings (TACs, results,
+                # the tables of the scene updated in place)
+                restore = getattr(widget, "restoreSavedFit", None)
+                if callable(restore):
+                    restore()
         except Exception:
             logging.warning(f"Neuro: could not set the inputs of step {key}", exc_info=True)
 
@@ -3064,6 +3339,23 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return bool(button is not None and button.enabled)
         return False
 
+    def releaseEarlierUndo(self, key):
+        """Step key hardened (changed the series): the Revert records of the motion correction and the CT/MR
+        registration before it are dropped. With Overwrite each keeps the whole series as it was (a GB or more for a
+        dynamic series), and reverting an earlier step after a later one would mix the two anyway."""
+        order = [k for k, *_ in self.STEPS]
+        released = []
+        for earlier in (STEP_MC, STEP_REG):
+            if earlier not in self.embedded or key not in order or order.index(earlier) >= order.index(key):
+                continue
+            widget = self.stepWidget(earlier)
+            release = getattr(widget, "releaseUndo", None)
+            if release is not None and release():
+                released.append(earlier)
+        if released:
+            logging.info(f"Neuro: Revert records of {', '.join(released)} dropped after {key} (memory freed)")
+        return released
+
     def _hardenStep(self, key):
         if key == STEP_NORM:
             self.onNormHarden()
@@ -3106,6 +3398,10 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.refresh()
             return
         if previous != key:
+            order = [k for k, *_ in self.STEPS]
+            if (previous == STEP_REG and key in order and order.index(key) > order.index(previous)
+                    and getattr(self.stepWidget(previous), "hardened", False)):
+                self.releaseEarlierUndo(STEP_REG)      # registered, going on: the motion correction's copy goes
             if previous in self.embedded:
                 self._takeSeriesFrom(previous)
             self._callStep(previous, "exit")
@@ -3115,6 +3411,7 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             logging.warning(f"Neuro: cannot show step {key}: {error}")
             key, panel = STEP_DATA, self.stepPanel(STEP_DATA)
         self.current = key
+        self._saveStep(key)
         self.stack.setCurrentWidget(panel)
         self.banner.setVisible(key in self.BANNER_STEPS and self.banner.hasPicture())
         # only the shown page stays in the stack (the stack takes the height of its tallest page otherwise)
@@ -3240,12 +3537,16 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # --- module ------------------------------------------------------------------------------------
     def enter(self):
         self._entered = True
+        self._saveShown(True)
         self._showToolbar(True)
         self.selectInputs()
         self.showStep(self.current)
+        if getattr(self, "_pendingLayoutCheck", False):        # a scene loaded while the module was not shown
+            qt.QTimer.singleShot(500, self._dropForeignLayout)
 
     def exit(self):
         self._entered = False
+        self._saveShown(False)
         self.refreshTimer.stop()
         self._showToolbar(False)
         if self.current in self.embedded:
@@ -3298,3 +3599,97 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         except Exception:
             logging.exception("Neuro: could not show the Data step after scene close")
         self._refreshLater()
+
+    # --- the workflow saved with the scene (NeuroWorkflowLib.scenestate) ------------------------------
+    # {layout ID: step} of a scene saved before the step was kept: the step of the layout it was saved in
+    LAYOUT_STEPS = {7805: STEP_MODEL, 7830: STEP_REGIONS}      # Modeling (PET4D), regions (database.py)
+
+    @staticmethod
+    def registerLayouts():
+        """The module's own layouts made known to Slicer (at startup too: a scene saved in one opens its views)."""
+        from NeuroWorkflowLib.database import registerRegionsLayout
+        registerRegionsLayout()
+
+    def _saveStep(self, key):
+        """The step on screen kept in the parameter node (saved with the scene)."""
+        if getattr(self, "_holdStep", False) or scenestate.sceneIsBusy():
+            return
+        try:
+            node = self._parameter()
+            if node.GetParameter(scenestate.STEP_PARAMETER) != key:
+                node.SetParameter(scenestate.STEP_PARAMETER, key)
+        except Exception:
+            logging.debug("Neuro: could not keep the step", exc_info=True)
+
+    def _saveShown(self, shown):
+        """Whether the module is shown, kept in the parameter node: a scene saved with it shown opens it again."""
+        if scenestate.sceneIsBusy():
+            return
+        try:
+            node = self._parameter()
+            value = "1" if shown else "0"
+            if node.GetParameter(scenestate.SHOWN_PARAMETER) != value:
+                node.SetParameter(scenestate.SHOWN_PARAMETER, value)
+        except Exception:
+            logging.debug("Neuro: could not keep whether the module is shown", exc_info=True)
+
+    def _adoptSceneNodes(self):
+        """A scene loaded: the nodes the steps made that are kept in the parameter node taken back (none here)."""
+
+    def _layoutOwned(self, layoutId):
+        """Whether the layout on screen belongs to the step shown (a session of it open), after a scene load."""
+        from NeuroWorkflowLib.database import REGIONS_LAYOUT_ID
+        if layoutId == REGIONS_LAYOUT_ID:
+            return self.current == STEP_REGIONS
+        if layoutId in scenestate.PET4D_LAYOUTS:
+            if self.normSession is not None or getattr(self, "regSession", None) is not None:
+                return True
+            widget = self.stepWidget(self.current)
+            return widget is not None and getattr(widget, "session", None) is not None
+        return True
+
+    def restoreFromScene(self, step=None):
+        """A scene was loaded (scenestate.restoreModule): the step it was saved on (Data when that step cannot be
+        opened with the scene's nodes), shown now when the module is shown (else when it is), its views built again;
+        a layout of a step that is not open (e.g. the normalization's, saved before Harden) back to four-up."""
+        keys = [k for k, *_ in self.STEPS]
+        node = scenestate.parameterNode(self.MODULE_NAME)
+        step = step or (node.GetParameter(scenestate.STEP_PARAMETER) if node is not None else "") or STEP_DATA
+        try:
+            self._adoptSceneNodes()
+        except Exception:
+            logging.exception("Neuro: could not take back the nodes of the scene")
+        self.selectInputs()
+        states = self.stepStates()
+        if step not in keys or (step != STEP_DATA and states.get(step) == STATE_WAITING):
+            logging.info(f"Neuro: the '{step}' step cannot be opened with this scene's nodes, Data step shown")
+            step = STEP_DATA
+        if getattr(self, "_entered", False) and slicer.util.selectedModule() == self.MODULE_NAME:
+            if self.current != step:
+                # the step on screen (Data after the scene was closed) left without the leaving checks (Harden,
+                # smoothing): it belongs to the scene before
+                self._callStep(self.current, "exit")
+                self.current = step
+            self.showStep(step)
+            qt.QTimer.singleShot(500, self._dropForeignLayout)
+        else:
+            self.current = step
+            self._saveStep(step)
+            self._pendingLayoutCheck = True
+        self._refreshLater()
+
+    def _dropForeignLayout(self):
+        """The layout the scene was saved in, when no step of it is open now: four-up (its views would stay empty)."""
+        self._pendingLayoutCheck = False
+        layoutId = scenestate.currentLayout()
+        if layoutId is None or self._layoutOwned(layoutId):
+            return
+        logging.info(f"Neuro: layout {layoutId} of the saved scene has no open step, four-up shown")
+        slicer.app.layoutManager().setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
+
+    def onSceneSave(self, caller, event):
+        """Saving: the display nodes of the helper nodes that are not saved are not saved either."""
+        try:
+            scenestate.dropOrphanDisplayNodes()
+        except Exception:
+            logging.debug("Neuro: could not leave the helpers' display nodes out of the scene", exc_info=True)

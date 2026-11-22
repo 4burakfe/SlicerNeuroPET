@@ -11,6 +11,7 @@ import vtk
 
 from DICOMGatedDynamicPETLib import colormaps, colortables
 from NeuroWorkflowLib.base import _ijkToRas, _percentiles, _vtkMatrix
+from NeuroWorkflowLib.scenestate import unsaved
 from NeuroPETLib import neuroreview as nr
 
 from StaticNeuroPETLib.constants import SCORE_COLOR_NODE, STEP_REVIEW
@@ -26,11 +27,14 @@ class ReviewColorsMixin:
             if self.scoreNode is not None and scene.IsNodePresent(self.scoreNode):
                 scene.RemoveNode(self.scoreNode)
             self.scoreNode = None
+            self.setNode("ReviewScore", None)
             return
         if self.scoreNode is None or not scene.IsNodePresent(self.scoreNode):
             self.scoreNode = scene.AddNewNodeByClass("vtkMRMLScalarVolumeNode",
                                                      scene.GenerateUniqueName(f"{result['volume'].GetName()} score"))
             self.scoreNode.CreateDefaultDisplayNodes()
+        # saved with the scene and taken back when it is loaded (the comparison then made again into it)
+        self.setNode("ReviewScore", self.scoreNode)
         self.scoreNode.SetIJKToRASMatrix(_vtkMatrix(_ijkToRas(result["grid"])))
         slicer.util.updateVolumeFromArray(self.scoreNode, result["z"])
 
@@ -161,8 +165,8 @@ class ReviewColorsMixin:
         scene = slicer.mrmlScene
         node = getattr(self, "scoreRgbNode", None)
         if node is None or not scene.IsNodePresent(node):
-            node = scene.AddNewNodeByClass("vtkMRMLVectorVolumeNode", scene.GenerateUniqueName(
-                f"{result['volume'].GetName()} score colors"))
+            node = unsaved(scene.AddNewNodeByClass("vtkMRMLVectorVolumeNode", scene.GenerateUniqueName(
+                f"{result['volume'].GetName()} score colors")))      # made again from the scores
             self.scoreRgbNode = node
         node.SetIJKToRASMatrix(_vtkMatrix(_ijkToRas(result["grid"])))
         factor = nr.tFactor(result.get("n")) if self._scoreKind() == nr.SCORE_T else 1.0
@@ -240,6 +244,7 @@ class ReviewColorsMixin:
             node = scene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", scene.GenerateUniqueName("Neuro review PET (grey)"))
             node.SetHideFromEditors(True)
             node.CreateDefaultDisplayNodes()
+            unsaved(node)       # shares the PET's voxels: not written again with the scene
             self.greyPetNode = node
         if node.GetImageData() is not pet.GetImageData():
             node.SetAndObserveImageData(pet.GetImageData())

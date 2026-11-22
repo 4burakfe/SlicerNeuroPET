@@ -13,6 +13,7 @@ import slicer
 import vtk
 
 from NeuroWorkflowLib.base import _ijkToRas
+from NeuroWorkflowLib.scenestate import unsaved
 from NeuroPETLib import neuroreview as nr, ssp
 
 from StaticNeuroPETLib.constants import CUT_MODEL_ATTRIBUTE, CUT_MODEL_NAME, CUT_UPDATE_DELAY_MS, SSP_CAMERA_DISTANCE
@@ -98,6 +99,7 @@ class ReviewCutMixin:
                 f"{CUT_MODEL_NAME} {' '.join(key)}"))
             node.SetAttribute(CUT_MODEL_ATTRIBUTE, "/".join(key))
             node.CreateDefaultDisplayNodes()
+            unsaved(node)       # made again from the comparison
             node.GetDisplayNode().SetVisibility2D(False)
             # no views = every view: hidden until its views are set
             self._setViewNodeIds(node.GetDisplayNode(), ["vtkMRMLViewNodeNone"])
@@ -133,6 +135,7 @@ class ReviewCutMixin:
             node = scene.AddNewNodeByClass("vtkMRMLClipNode", scene.GenerateUniqueName(
                 f"{CUT_MODEL_NAME} clip {orientation} {side}"))
             node.SetAttribute(CUT_MODEL_ATTRIBUTE, f"clip/{orientation}/{side}")
+            unsaved(node)
             nodes[(orientation, side)] = node
         _, normal = self._slicePlane(sliceNode)
         direction, _ = ssp.cutCamera(nr.cutDirection(side))

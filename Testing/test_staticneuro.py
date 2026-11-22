@@ -70,6 +70,10 @@ def test_region_settings(tmp_path):
     assert settings["referenceMaskPath"].endswith("reference_mask.nii.gz") and settings["growMm"] == 2.0
     text = "\n".join(sn.settingsText(settings))
     assert "broad regions" in text and "white matter only" in text and "8 mm" in text and "database's mask" in text
+    # an atlas region's mask replaces that region's own regions, found in the atlas; a global mask overlaps them
+    assert sn.referenceMaskDrop(settings) == {"referenceMembers": "Pons"}
+    assert sn.referenceMaskDrop(dict(settings, referenceRegion=normaldb.REF_GLOBAL)) == {"dropReferenceRegions": False}
+    assert sn.referenceMaskDrop(dict(settings, referenceRegion=normaldb.REF_CUSTOM)) == {"dropReferenceRegions": False}
     assert sn.masterMeanPath(str(tmp_path), header) is None
     (tmp_path / "stats").mkdir()
     (tmp_path / "stats" / "master_mean.nii.gz").write_bytes(b"m")

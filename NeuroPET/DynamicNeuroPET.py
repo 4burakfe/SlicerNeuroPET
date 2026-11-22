@@ -9,20 +9,23 @@ A step-by-step workflow for dynamic receptor PET of the brain, built on the othe
                             optional Gaussian smoothing of the series (off by default) before the next steps
     2. Motion correction    the Dynamic PET Motion Correction panel, on the series of step 1 (iterative engine by
                             default, BRAINSFit selectable)
-    3. CT/MR registration   the Dynamic PET to CT/MR Registration panel, the series to the CT / MR (iterative rigid
-                            only in this workflow)
+    3. CT/MR registration   the Dynamic PET to CT/MR Registration panel, the series to the CT / MR (iterative, rigid
+                            by default, affine selectable, no deformable in this workflow)
     4. Normalization        to a template space (default: MNI ICBM 152 2009c; the iterative engine, one affine stage
                             by default; BRAINSFit and deformable passes selectable): the PET registered to the
                             template, or the CT / MR normalized and the same transform applied to the PET (default
                             when the study has a CT / MR). Checked in the registration layout (PET / fusion /
-                            template, checkerboard, manual correction), then hardened (Overwrite by default).
+                            template, checkerboard, manual correction), then hardened (Overwrite by default). A
+                            dynamic normal database may be picked here (or None): its normalization settings and
+                            spaces, and its PET template (summed PET to PET template).
     5. Regions              a segmentation of the space (CerebrA with pons, CerebrA PET, or one of the user's) in a
                             grouping (its regions, broad regions, Broad (Compatible)), left and right separate; the
                             reference region a region of the same atlas with the sides merged (default: the
                             cerebellar grey matter) or the centrum semiovale of the space (white matter, for tracers
                             binding in all grey matter). The label maps of the groupings are made on first use.
-    6. Modeling             the Dynamic PET Modeling panel, ready with the normalized series, the regions, SRTM and
-                            the reference region of step 5
+                            With a database: locked to its region settings (Unlock), 3x2 regions views.
+    6. Modeling             the Dynamic PET Modeling panel, ready with the normalized series, the regions, SRTM2 and
+                            the reference region of step 5; with a database, its kinetic model and settings
 
 Steps 2, 3 and 6 show the panels of those modules inside this one; the series each step makes (a motion corrected or
 registered series saved separately) becomes the series of the next step. The template spaces and segmentations come
@@ -31,6 +34,7 @@ from the atlas library (NeuroPETLib/neuro.py): the extension's Resources/Atlas a
 
 
 import logging
+import json
 import os
 import sys
 
@@ -67,6 +71,12 @@ from NeuroWorkflowLib.base import (VTKObservationMixin, requireBaseExtension, dy
                                    ICON_PATH, STATE_DONE, STATE_READY, STATE_WAITING, STATE_COLORS, _vtkMatrix,
                                    _ijkToRas, _percentiles, defaultReferenceName, NeuroWorkflowLogic, _badge,
                                    _badgePixmap, _button, _growIntoCombo, NeuroWorkflowWidget)  # noqa: E402,F401
+from NeuroWorkflowLib import scenestate  # noqa: E402
+from NeuroWorkflowLib.database import (DatabaseFolderLogicMixin, NormalizationDatabaseMixin,  # noqa: E402
+                                       RegionsDatabaseMixin, NORMALIZATION_ATTRIBUTE, seriesInfo)
+
+# the normalization methods: the summed PET to a PET template of a dynamic database too (its subjects' summed images)
+DYNAMIC_METHODS = METHODS + ((METHOD_PET_TEMPLATE, "Register the summed PET to the database's PET template"),)
 
 
 class DynamicNeuroPET(ScriptedLoadableModule):
@@ -80,11 +90,13 @@ class DynamicNeuroPET(ScriptedLoadableModule):
         parent.helpText = (
             "Workflow for dynamic receptor PET of the brain: <b>1. Data</b> (dynamic series from DICOM or a BIDS "
             "NIfTI, the CT/MR, patient, age and sex, optional smoothing), <b>2. Motion correction</b>, <b>3. CT/MR "
-            "registration</b> (rigid), <b>4. Normalization</b> to a template space (default MNI ICBM 152 2009c), "
-            "<b>5. Regions</b> (a segmentation of the space, default CerebrA) and <b>6. Modeling</b> (SRTM with the "
+            "registration</b> (rigid by default, affine selectable), <b>4. Normalization</b> to a template space (default MNI ICBM 152 2009c), "
+            "<b>5. Regions</b> (a segmentation of the space, default CerebrA PET) and <b>6. Modeling</b> (SRTM2 with the "
             "cerebellar grey matter as the reference by default). Steps 2, 3 and 6 show the panels of the PET4D "
             "modules. The extension brings the MNI 2009c space and the CerebrA segmentations; more spaces and "
-            "segmentations go in your atlas folder (~/NeuroPET/Atlas, 'Open atlas folder' in step 4).")
+            "segmentations go in your atlas folder (~/NeuroPET/Atlas, 'Open atlas folder' in step 4). A dynamic "
+            "normal database (Neuro PET Database Manager) can be picked in step 4: its normalization, region and "
+            "kinetic settings are then used.")
         parent.acknowledgementText = (
             "Part of Mergen (Neuro PET/SPECT Analysis), built on the PET4D (DICOM Gated / Dynamic PET) extension. "
             "MNI ICBM 152 nonlinear symmetric 2009c template: Fonov "
@@ -92,18 +104,151 @@ class DynamicNeuroPET(ScriptedLoadableModule):
             "Collins, McConnell Brain Imaging Centre, Montreal Neurological Institute, McGill University). CerebrA: "
             "Manera AL et al., Scientific Data 2020;7:237 (CC0). Registration by the iterative multi-resolution "
             "engine (SimpleITK) or BRAINSFit.")
+        # the layouts known before a scene saved in one of them is loaded; the workflow opened again on its step
+        scenestate.installAtStartup("DynamicNeuroPET", DynamicNeuroPETWidget.registerLayouts,
+                                    DynamicNeuroPETWidget.LAYOUT_STEPS)
 
 
-class DynamicNeuroPETLogic(NeuroWorkflowLogic):
+class DynamicNeuroPETLogic(DatabaseFolderLogicMixin, NeuroWorkflowLogic):
     """The workflow's logic (NeuroWorkflowLib.base.NeuroWorkflowLogic): normalization and regions; usable without the
-    widget (see there)."""
+    widget (see there). The dynamic normal databases of the database folder (NeuroWorkflowLib.database)."""
+
+    DATABASE_MODE = normaldb.DYNAMIC
+
+    @staticmethod
+    def seriesInfo(sequence):
+        """staticneuro.imageInfo() of a dynamic series (modality, units, nuclide, tracer)."""
+        return seriesInfo(sequence)
 
 
-class DynamicNeuroPETWidget(NeuroWorkflowWidget):
-    """The workflow's widget (NeuroWorkflowLib.base.NeuroWorkflowWidget) with the Dynamic Neuro steps."""
+class DynamicNeuroPETWidget(NormalizationDatabaseMixin, RegionsDatabaseMixin, NeuroWorkflowWidget):
+    """The workflow's widget (NeuroWorkflowLib.base.NeuroWorkflowWidget) with the Dynamic Neuro steps; the dynamic
+    normal database picked on the Normalization page ('' for none: never blocking), its normalization settings the
+    page's default, the Regions page locked to its region settings, the regions step views
+    (NeuroWorkflowLib.database)."""
 
     MODULE_NAME = "DynamicNeuroPET"
     LOGIC_CLASS = DynamicNeuroPETLogic
+    DATABASE_MODE = normaldb.DYNAMIC
+    NORM_METHODS = DYNAMIC_METHODS
+    COMPARED_IN = "the Compare step"
+
+    def setup(self):
+        self.databaseRows = []          # [(folder, header, rank, problems)] of the dynamic databases
+        self._databaseKey = None
+        self._databaseChosen = False
+        self._modelingPreset = None     # (database folder, series, regions) whose kinetics Modeling was set to
+        NeuroWorkflowWidget.setup(self)
+
+    def volume(self):
+        """The series' summed image (normalized with it): the image the databases are matched with and the regions
+        views show."""
+        sequence = self.sequence()
+        return self.logic.displayImage(sequence) if sequence is not None else None
+
+    def _databaseImageInfo(self):
+        return self.logic.seriesInfo(self.sequence())
+
+    def _callStep(self, key, method):
+        if key == STEP_REGIONS:
+            if method == "exit":
+                self._exitRegionsViews()
+            elif method == "enter":
+                self._enterRegionsViews()
+        NeuroWorkflowWidget._callStep(self, key, method)
+
+    def _prepareModeling(self, widget):
+        """The workflow's inputs; with a dynamic database picked, once per database and series, its kinetic model
+        and settings too (the maps are then made as the database's were)."""
+        NeuroWorkflowWidget._prepareModeling(self, widget)
+        folder = self._database()
+        header = self._header(folder) if folder else None
+        settings = normaldb.kinetics(header) if header else None
+        # the base sets the default model with new regions: the database's again then
+        key = (folder,) + tuple(node.GetID() if node is not None else None
+                                for node in (self.sequence(), self.node("Segmentation")))
+        if not settings or normaldb.kineticErrors(settings) or key == self._modelingPreset:
+            return
+        self._modelingPreset = key
+        try:
+            self._applyKinetics(widget, settings)
+            logging.info(f"Neuro: Modeling set to the kinetics of '{header.get('name')}': "
+                         f"{normaldb.kineticsText(settings)}")
+        except Exception:
+            logging.warning("Neuro: could not set the database's kinetic model in Modeling", exc_info=True)
+
+    def _applyKinetics(self, widget, settings):
+        """The Modeling step's model, weighting, time zero, t*, reference k2', SUVR window and clipping set to a
+        dynamic database's kinetics (normaldb.kinetics); the workflow's reference region kept."""
+        def pick(combo, data):
+            index = combo.findData(data)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+            return index >= 0
+
+        pick(widget.modelCombo, settings["model"])
+        # a new model guesses the reference again: the workflow's (the database's) reference region back
+        referenceId = self._parameter().GetParameter(NEURO_PREFIX + "ReferenceSegment")
+        if referenceId:
+            pick(widget.referenceCombo, referenceId)
+        pick(widget.weightingCombo, settings["weighting"])
+        index = widget.timeZeroCombo.findData(settings["timeZero"])
+        try:
+            enabled = widget.timeZeroCombo.model().item(index).isEnabled() if index >= 0 else False
+        except Exception:
+            enabled = index >= 0
+        if enabled:
+            widget.timeZeroCombo.setCurrentIndex(index)
+        else:
+            logging.warning(f"Neuro: the database's time zero '{settings['timeZero']}' is not available for this "
+                            "series (no injection time); the start of the first frame is used")
+        widget.autoTStarCheck.checked = False
+        widget.tStarSpin.value = float(settings["tStarMin"])
+        options = normaldb.kineticOptions(settings)
+        widget.k2refSpin.value = options["k2ref"] or 0.0
+        if options["window"]:
+            widget.windowStartSpin.value, widget.windowEndSpin.value = options["window"]
+        elif hasattr(widget, "_setDefaultWindow"):
+            widget._setDefaultWindow()
+        widget.clipCheck.checked = options["clipNegative"]
+
+    def onNormHarden(self):
+        """Harden; the settings of the normalization kept on the normalized series and its summed image (compared
+        with a database's)."""
+        settings = (self.normResult or {}).get("settings")
+        done = NeuroWorkflowWidget.onNormHarden(self)
+        sequence = self.sequence()
+        if done and sequence is not None and settings:
+            for node in (sequence, self.volume()):
+                if node is not None:
+                    node.SetAttribute(NORMALIZATION_ATTRIBUTE, json.dumps(settings))
+        if done and ((self.normUndo or {}).get("undo") or {}).get("action") == reg.OVERWRITE:
+            # Overwrite cannot be undone: the series in the patient space (a whole copy of it) is not kept
+            self.normUndo = None
+            self._updateNormButtons()
+        self._updateDatabaseInfo()
+
+    @staticmethod
+    def _normHardenText(sequence, template, method):
+        return (f"Resample the {sequence.GetNumberOfDataNodes()} frames of '{sequence.GetName()}' (and its summed "
+                f"image) through the normalization onto the field of view of the template '{template.GetName()}'."
+                + ("\nThe CT/MR is normalized too (on the template grid)." if method == METHOD_ANATOMY else "")
+                + "\n\nOverwrite (default) replaces the series with the normalized one and cannot be undone: the "
+                "series in the patient space is not kept in memory (load it again to start over). Save separately "
+                "keeps it next to the normalized one (Revert removes the normalized one); a dynamic series takes a "
+                "lot of memory.")
+
+    def cleanup(self):
+        if getattr(self, "current", None) == STEP_REGIONS:
+            self._exitRegionsViews()
+        NeuroWorkflowWidget.cleanup(self)
+
+    def onSceneClose(self, caller, event):
+        NeuroWorkflowWidget.onSceneClose(self, caller, event)
+        self._regionsPreviousLayout = None
+        self._regionsHelpers = None
+        self._databaseKey = None
+        self._modelingPreset = None
 
     def onReload(self):
         """Developer reload: the NeuroWorkflowLib files reloaded first (Slicer reloads only this file)."""
@@ -177,13 +322,13 @@ class DynamicNeuroPETTest(ScriptedLoadableModuleTest):
         key = neuro.regionAtlasKey("TestRegions")
         segmentation, referenceId = logic.loadAtlasRegions(atlas, key)
         names = sorted(segmentation.GetSegmentation().GetSegment(i).GetName() for i in logic.segmentIds(segmentation))
-        self.assertEqual(names, sorted(["Putamen R", "Putamen L", "Cerebellum Gray Matter R",
-                                        "Cerebellum Gray Matter L", "Pons R", "Pons L",
+        # the regions the reference is made of are left out; the reference is in the one labelmap layer
+        self.assertEqual(names, sorted(["Putamen R", "Putamen L", "Pons R", "Pons L",
                                         "Cerebellum Gray Matter" + REFERENCE_SUFFIX]))
         mask = slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, referenceId)
         self.assertEqual(int(np.count_nonzero(mask)), 2 * 64)
-        right = logic.segmentIdByName(segmentation, "Cerebellum Gray Matter R")
-        self.assertEqual(int(np.count_nonzero(slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, right))), 64)
+        self.assertIsNone(logic.segmentIdByName(segmentation, "Cerebellum Gray Matter R"))
+        self.assertEqual(segmentation.GetSegmentation().GetNumberOfLayers(), 1)
         # the sides merged: made in the cache folder
         merged, mergedRef = logic.loadAtlasRegions(atlas, neuro.mergedRegionAtlas(key), neuro.mergedRegionAtlas(key),
                                                    "Pons")
@@ -207,6 +352,8 @@ class DynamicNeuroPETTest(ScriptedLoadableModuleTest):
         self.assertEqual(grown.GetSegmentation().GetSegment(grownRef).GetName(),
                          "Cerebellum Gray Matter" + REFERENCE_SUFFIX)
         self.assertLess(int(np.count_nonzero(slicer.util.arrayFromSegmentBinaryLabelmap(grown, grownRef))), 2 * 64)
+        self.assertIsNone(logic.segmentIdByName(grown, "Cerebellum Gray Matter"))
+        self.assertEqual(grown.GetSegmentation().GetNumberOfLayers(), 1)
         with self.assertRaises(ValueError):        # no white matter map
             logic.loadAtlasRegions(atlas, key, growMm=1.0, growInto=normaldb.GROW_ONLY_WM)
         # the extension's segmentations are there, on the extension's space

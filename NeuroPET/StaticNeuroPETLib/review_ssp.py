@@ -15,6 +15,7 @@ import vtk
 
 from DICOMGatedDynamicPETLib import colormaps
 from NeuroWorkflowLib.base import _button
+from NeuroWorkflowLib.scenestate import unsaved
 from NeuroPETLib import neuroreview as nr, ssp
 
 from StaticNeuroPETLib.constants import (REVIEW_SSP_PATIENT_COLORMAP, SSP_CAMERA_DISTANCE, SSP_COLOR_NODE,
@@ -242,6 +243,7 @@ class ReviewSspMixin:
             node = scene.AddNewNodeByClass("vtkMRMLModelNode", scene.GenerateUniqueName(name))
             node.SetAttribute(SSP_MODEL_ATTRIBUTE, f"{viewSet or 'main'}/{part}")
             node.CreateDefaultDisplayNodes()
+            unsaved(node)       # made again from the comparison
             self.sspModels[(viewSet, part)] = node
         return node
 

@@ -18,6 +18,23 @@ from StaticNeuroPETLib.constants import (MONITOR2_PLACE_DELAY_MS, REVIEW_OUTLINE
 from StaticNeuroPETLib.helpers import _mainViewportAttributes, _showOnSecondScreen
 
 
+def registerReviewLayouts():
+    """The review layouts made known to Slicer with their default views (at startup: a scene saved in one of them
+    opens its views; the review updates them to its settings when it is shown)."""
+    layoutManager = slicer.app.layoutManager()
+    if layoutManager is None:
+        return
+    layoutNode = layoutManager.layoutLogic().GetLayoutNode()
+    attributes = None
+    for layoutId in nr.LAYOUT_IDS:
+        if layoutNode.IsLayoutDescription(layoutId):
+            continue
+        if attributes is None:
+            attributes = _mainViewportAttributes()
+        layoutNode.AddLayoutDescription(layoutId, nr.layoutXml(layoutId, attributes, True, nr.tableByDefault(layoutId),
+                                                               False))
+
+
 class ReviewLayoutMixin:
     """The review layout methods of StaticNeuroPETWidget."""
 
@@ -208,8 +225,10 @@ class ReviewLayoutMixin:
         self._syncCameras(False)
         self._restoreSegmentationDisplay()
         layoutManager = slicer.app.layoutManager()
-        if layoutManager is not None and layoutManager.layout in nr.LAYOUT_IDS and self._reviewPreviousLayout is not None:
-            layoutManager.setLayout(self._reviewPreviousLayout)
+        if layoutManager is not None and layoutManager.layout in nr.LAYOUT_IDS:
+            # four-up when the review opened in its layout already (a scene saved in the review)
+            layoutManager.setLayout(self._reviewPreviousLayout if self._reviewPreviousLayout is not None
+                                    else slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
         self._reviewPreviousLayout = None
 
     def _reviewSliceWidgets(self):

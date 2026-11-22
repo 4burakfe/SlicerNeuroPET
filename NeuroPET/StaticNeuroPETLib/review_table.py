@@ -81,6 +81,7 @@ class ReviewTableMixin:
             cellRows.append(numbers)
         if self.reviewTable is None or not scene.IsNodePresent(self.reviewTable):
             self.reviewTable = scene.AddNewNodeByClass("vtkMRMLTableNode", scene.GenerateUniqueName("Neuro review"))
+        self.setNode("ReviewTable", self.reviewTable)       # taken back when the saved scene is loaded
         self.reviewTable.SetAndObserveTable(table)
         if hasattr(self.reviewTable, "SetUseColumnNameAsColumnHeader"):
             self.reviewTable.SetUseColumnNameAsColumnHeader(True)

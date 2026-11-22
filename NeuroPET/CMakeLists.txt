@@ -26,6 +26,8 @@ set(NEURO_LIB_SCRIPTS
 set(NEURO_WORKFLOW_LIB_SCRIPTS
   NeuroWorkflowLib/__init__.py
   NeuroWorkflowLib/base.py
+  NeuroWorkflowLib/database.py
+  NeuroWorkflowLib/scenestate.py
   )
 
 slicerMacroBuildScriptedModule(

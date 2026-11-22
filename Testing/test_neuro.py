@@ -377,6 +377,38 @@ def test_readSegmentationFile_and_labels(tmp_path):
     assert unknown == [] and labels[0, 0, 0] == 49 and int(np.count_nonzero(labels)) == 1
 
 
+def test_drawn_white_matter_reference(tmp_path):
+    """A 'Centrum Semiovale' segment of a segmentation is its reference, not a region of its label map."""
+    layer0 = np.zeros((3, 4, 5), np.uint8)
+    layer0[0, 0, 0] = 1     # Caudate R
+    layer0[2, 1:3, 1:4] = 105
+    path = tmp_path / "labels.seg.nrrd"
+    _writeSegNrrd(path, [layer0], [("Caudate R", 0, 1), ("Centrum Semiovale", 0, 105)])
+    mask, matrix = neuro.drawnWhiteMatterReference({"labels": str(path)})
+    assert mask.shape == (3, 4, 5) and int(mask.sum()) == 6 and mask[2, 1, 1] and not mask[0, 0, 0]
+    assert np.allclose(matrix[:3, 3], [-5, -6, -7])
+    layers, matrix, segments = neuro.readSegmentationFile(str(path))
+    structures = neuro.readCerebraLabels("Mindboggle ID;Label Name;RH Label;LH Labels\n50;Caudate;49;100\n")
+    labels, unknown = neuro.segmentationLabels(layers, segments, structures)
+    assert unknown == ["Centrum Semiovale"] and int(np.count_nonzero(labels)) == 1
+    # a region of the table (both sides): split at the midline, RAS x >= 0 right (x = i - 5 here)
+    structures = neuro.readCerebraLabels("Mindboggle ID;Label Name;RH Label;LH Labels\n50;Caudate;49;100\n"
+                                         ";Centrum Semiovale;105;106\n")
+    labels, unknown = neuro.segmentationLabels(layers, segments, structures, matrix)
+    assert unknown == [] and labels[0, 0, 0] == 49
+    assert labels[2, 1, 1] == 106 and labels[2, 1, 3] == 106 and int(np.count_nonzero(labels == 105)) == 0
+    shifted = np.array(matrix, dtype=float)
+    shifted[0, 3] = -2.0                                # x = i - 2: i 1 left, i 2 and 3 right
+    labels, _ = neuro.segmentationLabels(layers, segments, structures, shifted)
+    assert int(np.count_nonzero(labels == 106)) == 2 and int(np.count_nonzero(labels == 105)) == 4
+    assert neuro.fixedValuesOf(neuro.labelTable(structures)[0]) == [105, 106]
+    _writeSegNrrd(path, [layer0], [("Caudate R", 0, 1)])
+    assert neuro.drawnWhiteMatterReference({"labels": str(path)}) is None
+    assert neuro.drawnWhiteMatterReference({"labels": str(tmp_path / "labels.nrrd")}) is None
+    assert neuro.isWhiteMatterSegment(" centrum semiovale ") and neuro.isWhiteMatterSegment("Centrum Semiovale L")
+    assert not neuro.isWhiteMatterSegment("Caudate R")
+
+
 def test_growLabelsByRegion():
     labels = np.zeros((1, 1, 20), np.int32)
     labels[0, 0, 0] = 1     # grows 3
@@ -556,6 +588,12 @@ def test_bundled_library():
     names = [n for _, n, _ in neuro.regionTable("CerebrA:regions")[0]]
     assert "Pons R" in names and "Brainstem (except pons) L" in names and "Optic Chiasm R" not in names
     assert neuro.regionAtlasTitle("CerebrA_PET:compatible") == "CerebrA PET, Broad (Compatible)"
+    for info in segmentations.values():                 # the centrum semiovale drawn in both
+        drawn = neuro.drawnWhiteMatterReference(info)
+        assert drawn is not None and 80000 < int(drawn[0].sum()) < 130000
+    names = [n for _, n, _ in neuro.regionTable("CerebrA_PET:regions")[0]]
+    assert "Centrum Semiovale R" in names and "Centrum Semiovale L" in names
+    assert not any("Centrum" in n for _, n, _ in neuro.regionTable("CerebrA_PET:broad")[0])
 
 
 

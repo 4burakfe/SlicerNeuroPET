@@ -8,7 +8,8 @@ Receptor PET module (same normalization and regions) and the Neuro PET normal da
                             file (BIDS PET: sub-<id>_ses-<session>_pet.nii.gz with its .json sidecar and the
                             participants.tsv; a file, or a subject / session folder with its CT / MR), the patient's
                             CT / MR (DICOM or a file), the age and sex (read from the tags, editable)
-    2. CT/MR registration   optional: the image registered to the CT / MR (iterative rigid only) and hardened
+    2. CT/MR registration   optional: the image registered to the CT / MR (iterative, rigid by default, affine
+                            selectable) and hardened
     3. Normalization        the normal database (those of the image's modality, nuclide and tracer first; its
                             normalization settings are the defaults, others warn) and the normalization to a template
                             space (the database's; default MNI ICBM 152 2009c): the PET/SPECT to an MR template,
@@ -46,6 +47,8 @@ from DICOMGatedDynamicPETLib import registration as reg
 from NeuroWorkflowLib.base import (NeuroWorkflowLogic, NeuroWorkflowWidget, METHOD_PET, NEURO_PREFIX, REFERENCE_SUFFIX,
                                    REG_PREFIX, STATE_DONE, STATE_READY, STATE_WAITING, STEP_DATA, STEP_NORM, STEP_REG,
                                    STEP_REGIONS, _ijkToRas)
+from NeuroWorkflowLib import scenestate
+from NeuroWorkflowLib.database import REGIONS_LAYOUT_ID, registerRegionsLayout
 from NeuroPETLib import normaldb, neuroreview as nr, staticneuro as sn, ssp
 
 from StaticNeuroPETLib.constants import (ICON_PATH, METHODS, NORM_HARDEN_ACTIONS, NORM_HARDEN_GRIDS, REGIONS_COLUMNS,
@@ -69,7 +72,7 @@ from StaticNeuroPETLib.review_table import ReviewTableMixin
 from StaticNeuroPETLib.review_ssp import ReviewSspMixin
 from StaticNeuroPETLib.review_cut import ReviewCutMixin
 from StaticNeuroPETLib.review_peel import ReviewPeelMixin
-from StaticNeuroPETLib.review_layout import ReviewLayoutMixin
+from StaticNeuroPETLib.review_layout import ReviewLayoutMixin, registerReviewLayouts
 from StaticNeuroPETLib.review_mouse import ReviewMouseMixin
 from StaticNeuroPETLib.constants import BATCH_PET_FALLBACK, BATCH_SKIP  # noqa: F401 (NeuroPETDatabaseManager)
 
@@ -94,6 +97,9 @@ class StaticNeuroPET(ScriptedLoadableModule):
             "Part of Mergen (Neuro PET/SPECT Analysis), built on the PET4D (DICOM Gated / Dynamic PET) extension. "
             "MNI ICBM 152 nonlinear symmetric 2009c template: Fonov "
             "VS et al., NeuroImage 2011;54:313-327. CerebrA: Manera AL et al., Scientific Data 2020;7:237 (CC0).")
+        # the layouts known before a scene saved in one of them is loaded; the workflow opened again on its step
+        scenestate.installAtStartup("StaticNeuroPET", StaticNeuroPETWidget.registerLayouts,
+                                    StaticNeuroPETWidget.LAYOUT_STEPS)
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +115,10 @@ class StaticNeuroPETLogic(ImageLogicMixin, DatabaseLogicMixin, ReviewLogicMixin,
         result = logic.normalize(volume, template, METHOD_PET)
         undo, normalized, _, _ = logic.harden(volume, template, linearNode, reg.SAVE_SEPARATELY, ...)
     """
+
+    # the reference region's own regions left out, the reference one region of the label map (base: one layer);
+    # it has no z / t score: grey (Burak 2026-11-22)
+    REFERENCE_COLOR = (0.6, 0.6, 0.6)
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +171,27 @@ class StaticNeuroPETWidget(ToolbarMixin,
 
     def volume(self):
         return self.sequence()
+
+    # --- the workflow saved with the scene -------------------------------------------------------------
+    LAYOUT_STEPS = dict([(REGIONS_LAYOUT_ID, STEP_REGIONS)] + [(layoutId, STEP_REVIEW) for layoutId in nr.LAYOUT_IDS])
+
+    @staticmethod
+    def registerLayouts():
+        registerRegionsLayout()
+        registerReviewLayouts()
+
+    def _adoptSceneNodes(self):
+        """The review's score map and region table of the saved scene: the comparison made again on entering the
+        review writes into them (no second copy)."""
+        for attribute, role in (("scoreNode", "ReviewScore"), ("reviewTable", "ReviewTable")):
+            node = self.node(role)
+            if node is not None and slicer.mrmlScene.IsNodePresent(node):
+                setattr(self, attribute, node)
+
+    def _layoutOwned(self, layoutId):
+        if layoutId in nr.LAYOUT_IDS:
+            return self.current == STEP_REVIEW
+        return NeuroWorkflowWidget._layoutOwned(self, layoutId)
 
     # --- navigation: no CT/MR, no registration step; a step opens once the steps it needs are done ----------
     STEP_NEEDS = {STEP_REG: "Pick the PET / SPECT and its CT / MR in step 1 (Data) first.",
@@ -499,4 +530,21 @@ class StaticNeuroPETTest(ScriptedLoadableModuleTest):
         StaticNeuroPETLogic.writeQcPicture(picture, node, (anatomy, tuple(_ijkToRas(node).ravel())))
         self.assertTrue(os.path.getsize(picture) > 0)
         widget.showStep(STEP_DATA)
+        # the workflow saved with the scene: the step in the parameter node, the layouts known, back after a load
+        widget.registerLayouts()
+        layoutNode = slicer.app.layoutManager().layoutLogic().GetLayoutNode()
+        for layoutId in (REGIONS_LAYOUT_ID,) + nr.LAYOUT_IDS:
+            self.assertTrue(layoutNode.IsLayoutDescription(layoutId), layoutId)
+        widget.showStep(STEP_NORM)
+        self.assertEqual(scenestate.savedStep("StaticNeuroPET")[0], STEP_NORM)
+        path = os.path.join(_testFolder(), "workflow.mrb")
+        self.assertTrue(slicer.util.saveScene(path))
+        slicer.util.loadScene(path)
+        self.assertEqual(scenestate.savedStep("StaticNeuroPET")[0], STEP_NORM)
+        self.assertIsNotNone(widget.volume())                   # the image's reference kept
+        widget.restoreFromScene()
+        self.assertEqual(widget.current, STEP_NORM)
+        widget.setNode("Sequence", None)
+        widget.restoreFromScene(STEP_REVIEW)                    # no regions: cannot be opened, Data instead
+        self.assertEqual(widget.current, STEP_DATA)
         self.delayDisplay("Widget passed")

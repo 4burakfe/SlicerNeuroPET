@@ -166,15 +166,20 @@ def regionSide(name):
     return side[1] if side in (" L", " R") else None
 
 
-def hemisphereMasks(masks, shape):
-    """(left, right) boolean arrays of the regions {name: mask} named with a side ("... L" / "... R"; the others,
-    e.g. a bilateral reference, left out; a voxel of both sides left): the hemispheres of the medial views. None for
-    bilateral regions (no medial views: the brain is not cut at the midline)."""
+def hemisphereMasks(masks, shape, ijkToRas=None):
+    """(left, right) boolean arrays of the regions {name: mask} named with a side ("... L" / "... R"; the others
+    left out; a voxel of both sides left): the hemispheres of the medial views. With ijkToRas (of the masks' grid) a
+    bilateral reference region ("... (reference)", that replaces its regions of both sides) is split at the midline
+    (RAS x >= 0 right) into both. None for bilateral regions (no medial views: the brain is not cut at the
+    midline)."""
     left = np.zeros(shape, dtype=bool)
     right = np.zeros(shape, dtype=bool)
+    bilateral = []
     for name, mask in masks.items():
         side = regionSide(name)
         if side not in ("L", "R"):
+            if ijkToRas is not None and str(name or "").strip().lower().endswith(nr.REFERENCE_MARK):
+                bilateral.append(mask)
             continue
         target = left if side == "L" else right
         if isinstance(mask, nr.RegionMask):         # only its box (no whole-grid copy)
@@ -184,6 +189,19 @@ def hemisphereMasks(masks, shape):
             target |= np.asarray(mask, dtype=bool)
     if not left.any() or not right.any():
         return None
+    matrix = np.asarray(ijkToRas, dtype=np.float64) if bilateral else None
+    for mask in bilateral:
+        if isinstance(mask, nr.RegionMask):
+            if mask.box is None:
+                continue
+            box, crop = mask.box, mask.crop
+        else:
+            crop = np.asarray(mask, dtype=bool)
+            box = tuple(slice(0, n) for n in crop.shape)
+        k, j, i = np.ogrid[box]
+        x = matrix[0, 0] * i + matrix[0, 1] * j + matrix[0, 2] * k + matrix[0, 3]
+        left[box] |= crop & (x < 0)
+        right[box] |= crop & (x >= 0)
     return left, right & ~left
 
 

@@ -151,6 +151,22 @@ def test_hemisphere_masks():
                                  "Pons (reference)": nr.RegionMask.fromArray(bilateral)}, shape)
     assert np.array_equal(boxed[0], left) and np.array_equal(boxed[1], right)
     assert ssp.regionSide("Cuneus L") == "L" and ssp.regionSide("Prefrontal") is None
+    # with the grid's ijkToRas the bilateral reference (it replaces its regions of both sides) split at RAS x = 0
+    ijkToRas = np.array([[1.0, 0, 0, -2.5], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])     # i 0..5 -> x -2.5..2.5
+    bilateral = np.zeros(shape, bool)
+    bilateral[0, 0, 1:5] = True                 # x -1.5 .. 1.5
+    left, right = ssp.hemisphereMasks({"Precuneus L": region, "Precuneus R": other,
+                                       "Cerebellum Whole (reference)": bilateral, "Vermis": bilateral}, shape, ijkToRas)
+    assert left[0, 0].tolist() == [False, True, True, True, True, False]
+    assert right[0, 0].tolist() == [False, False, False, False, False, True]      # a voxel of both sides left
+    lone = np.zeros(shape, bool)
+    lone[0, 0, 0] = True
+    left, right = ssp.hemisphereMasks({"Precuneus L": lone, "Precuneus R": other,
+                                       "Cerebellum Whole (reference)": nr.RegionMask.fromArray(bilateral)}, shape,
+                                      ijkToRas)
+    assert left[0, 0].tolist() == [True, True, True, False, False, False]
+    assert right[0, 0].tolist() == [False, False, False, True, True, True]
+    assert ssp.hemisphereMasks({"Cerebellum Whole (reference)": bilateral}, shape, ijkToRas) is None
 
 
 def test_side_labels():

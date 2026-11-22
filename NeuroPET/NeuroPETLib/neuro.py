@@ -41,7 +41,8 @@ import numpy as np
 SPACE_FOLDER, SEGMENTATION_FOLDER = "Space", "Segmentation"
 SPACE_MANIFEST, SEGMENTATION_MANIFEST = "space.json", "segmentation.json"
 DEFAULT_SPACE = "MNI152NLin2009cSym"         # MNI ICBM 152 2009c nonlinear symmetric, 1 mm (the extension's)
-DEFAULT_SEGMENTATION = "CerebrA"
+DEFAULT_SEGMENTATION = "CerebrA"             # the base segmentation (its structures: brain hull, centrum semiovale)
+DEFAULT_REGION_SEGMENTATION = "CerebrA_PET"   # the regions picked by default (made for PET, use with 0 mm growth)
 USER_FOLDER_VARIABLE = "NEUROPET_ATLAS_FOLDER"
 TEMPLATES = (   # key, title, file name stem in a space folder
     ("T1", "T1 (default)", "T1"),
@@ -348,7 +349,8 @@ GROUPINGS = ((REGIONS, "Regions, left and right (Putamen R / L)"),
              (COMPATIBLE, "Broad (Compatible), CortexID-like (Prefrontal Lateral R / L, Pons)"))
 GROUPING_SHORT = {REGIONS: "regions", BROAD: "broad regions", COMPATIBLE: "Broad (Compatible)"}
 MERGED = "Merged"           # grouping suffix: the sides merged ('regionsMerged'), for the reference regions
-DEFAULT_REGION_ATLAS = DEFAULT_SEGMENTATION + ":" + REGIONS
+DEFAULT_REGION_ATLAS = DEFAULT_REGION_SEGMENTATION + ":" + REGIONS
+BASE_REGION_ATLAS = DEFAULT_SEGMENTATION + ":" + REGIONS        # CerebrA with its lateral ventricles
 
 
 def _segmentationOf(segmentationId, folder):
@@ -386,7 +388,7 @@ def listSegmentations(space=None):
         if info:
             found[segmentationId] = info
     items = [s for s in found.values() if not space or s["space"] == space]
-    return _ordered(items, DEFAULT_SEGMENTATION)
+    return _ordered(items, DEFAULT_REGION_SEGMENTATION)
 
 
 def segmentationInfo(segmentationId=None):
@@ -402,7 +404,7 @@ def segmentationGroupings(info):
 
 
 def regionAtlasKey(segmentation=None, grouping=REGIONS, merged=False):
-    return f"{segmentation or DEFAULT_SEGMENTATION}:{grouping or REGIONS}{MERGED if merged else ''}"
+    return f"{segmentation or DEFAULT_REGION_SEGMENTATION}:{grouping or REGIONS}{MERGED if merged else ''}"
 
 
 def splitRegionAtlas(key):
@@ -1064,17 +1066,31 @@ def readSegmentationFile(path):
     return np.asarray(layers), matrix, out
 
 
-def segmentationLabels(layers, segments, structures):
+def segmentationLabels(layers, segments, structures, ijkToRas=None):
     """Label array (k, j, i) of a segmentation file's layers (readSegmentationFile), numbered by the label table
     structures: each segment by its name ('Caudate R' is the right Caudate value of the table; 'Segment_<value>' that
-    value). Where segments overlap, the earlier one keeps the voxel. Returns (labels, names of the segments not in the
-    table)."""
+    value). A segment named as a structure without its side ('Centrum Semiovale', drawn as one segment) is split at
+    the midline (RAS x >= 0 right, through ijkToRas) when the table has both sides. Where segments overlap, the
+    earlier one keeps the voxel. Returns (labels, names of the segments not in the table)."""
     values = {name.strip().lower(): value for value, name, _ in labelTable(structures)[0]}
+    bothSides = {s["name"].strip().lower(): (s["right"], s["left"]) for s in structures
+                 if s["right"] is not None and s["left"] is not None}
     known = set(values.values())
     labels = np.zeros(np.shape(layers)[1:], dtype=np.int32)
+    right = None
+    if ijkToRas is not None:
+        matrix = np.asarray(ijkToRas, dtype=float)
+        k, j, i = np.ogrid[0:labels.shape[0], 0:labels.shape[1], 0:labels.shape[2]]
+        right = np.broadcast_to(matrix[0, 0] * i + matrix[0, 1] * j + matrix[0, 2] * k + matrix[0, 3] >= 0,
+                                labels.shape)
     unknown = []
     for s in segments:
         name = s["name"].strip().lower()
+        if name in bothSides and name not in values and right is not None and 0 <= s["layer"] < len(layers):
+            voxels = (layers[s["layer"]] == s["value"]) & (labels == 0)
+            labels[voxels & right] = bothSides[name][0]
+            labels[voxels & ~right] = bothSides[name][1]
+            continue
         value = values.get(name)
         if value is None:
             match = re.fullmatch(r"segment_(\d+)", name)
@@ -1125,11 +1141,40 @@ def erodeMask(mask, distanceMm, spacing=(1.0, 1.0, 1.0)):
 # For tracers with specific binding in all grey matter ([11C]UCB-J, synaptic density: the cerebellum is no reference).
 # Listed among the reference regions of every region atlas when the space has its white matter map (WM).
 WHITE_MATTER_REFERENCE = "Centrum Semiovale (white matter)"
+# a segment of this name in a segmentation's labels.seg.nrrd is its centrum semiovale, drawn by hand (CerebrA and
+# CerebrA PET, 2026-11-21): used instead of the white matter rule below. Also a region (labels.csv, split at the
+# midline into R / L; not grown, in no group, left out of the 3D-SSP brain); the region list then offers it as the
+# reference 'Centrum Semiovale' and WHITE_MATTER_REFERENCE is kept for the settings and databases that name it.
+WHITE_MATTER_SEGMENT = "Centrum Semiovale"
 WM_REFERENCE_PROBABILITY = 0.9      # the core of the white matter (MNI white matter probability)
 
 
 def isWhiteMatterReference(name):
     return str(name or "").strip().lower() == WHITE_MATTER_REFERENCE.lower()
+
+
+def isWhiteMatterSegment(name):
+    """The centrum semiovale drawn in a segmentation or its region ('Centrum Semiovale', '... R', '... L', the
+    reference names)."""
+    name = re.sub(r"\s+[rl]$", "", str(name or "").strip().lower())
+    return name in (WHITE_MATTER_SEGMENT.lower(), WHITE_MATTER_REFERENCE.lower())
+
+
+def drawnWhiteMatterReference(info):
+    """The centrum semiovale drawn in a segmentation (neuro.segmentationInfo; a segment named WHITE_MATTER_SEGMENT in
+    its labels.seg.nrrd): (boolean mask k j i, IJK to RAS 4 x 4) on the segmentation's grid, or None when it has
+    none (or its labels are a label volume)."""
+    path = (info or {}).get("labels") or ""
+    if not path.lower().endswith(".seg.nrrd"):
+        return None
+    layers, ijkToRas, segments = readSegmentationFile(path)
+    found = [s for s in segments if isWhiteMatterSegment(s["name"]) and 0 <= s["layer"] < len(layers)]
+    if not found:
+        return None
+    mask = np.zeros(np.shape(layers)[1:], dtype=bool)
+    for s in found:
+        mask |= layers[s["layer"]] == s["value"]
+    return (mask, ijkToRas) if mask.any() else None
 
 
 def lateralVentricleValues(entries):
@@ -1140,7 +1185,8 @@ def lateralVentricleValues(entries):
 
 def whiteMatterReferenceMask(wm, labels, ventricleValues, ijkToRas, brainMask=None,
                              probability=WM_REFERENCE_PROBABILITY):
-    """The centrum semiovale (boolean, k j i): the cerebral white matter above the top of the lateral ventricles
+    """The centrum semiovale by rule, for a segmentation with none drawn (drawnWhiteMatterReference first)
+    (boolean, k j i): the cerebral white matter above the top of the lateral ventricles
     (ventricleValues of labels; superior in RAS through ijkToRas), where the white matter probability wm (stored 0-1,
     0-100 or 0-255) is at least probability, in no region of the atlas labels (cortex, deep grey matter, cerebellum,
     brainstem) and in brainMask when given; all on one grid. About 113 ml in MNI 2009c with CerebrA (both sides
@@ -1167,9 +1213,9 @@ def whiteMatterReferenceMask(wm, labels, ventricleValues, ijkToRas, brainMask=No
     return mask
 
 
-NO_GROW_WORDS = ("ventricle", "optic chiasm")       # CSF and the chiasm: never grown
+NO_GROW_WORDS = ("ventricle", "optic chiasm", "centrum semiovale")     # CSF, the chiasm, the drawn white matter
 
 
 def fixedValuesOf(entries):
-    """Label values of the entries that must not grow (ventricles, optic chiasm)."""
+    """Label values of the entries that must not grow (ventricles, optic chiasm, centrum semiovale)."""
     return [v for v, name, _ in entries if any(w in name.lower() for w in NO_GROW_WORDS)]

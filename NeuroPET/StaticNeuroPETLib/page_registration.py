@@ -33,8 +33,8 @@ class RegistrationPageMixin:
         self.regInfo = qt.QLabel()
         self.regInfo.wordWrap = True
         form.addRow(self.regInfo)
-        # the patient's own CT / MR: rigid only (iterative multi-resolution; no scaling, no deformable), the other
-        # engines and stages not offered
+        # the patient's own CT / MR: rigid by default, affine selectable (iterative multi-resolution; no deformable),
+        # the other engines not offered
         self.regEngineCombo = qt.QComboBox()
         for title, key in reg.ENGINES:
             self.regEngineCombo.addItem(title, key)
@@ -44,7 +44,7 @@ class RegistrationPageMixin:
         iterativeForm = qt.QFormLayout(self.regIterativeBox)
         iterativeForm.setContentsMargins(0, 0, 0, 0)
         self.regIterative = iterativeOptions(iterativeForm, linear=REG_LINEAR, deformable=False)
-        for key in ("linear", "deformable", "grid"):        # rigid, no deformable passes
+        for key in ("deformable", "grid"):        # rigid by default (affine can be picked), no deformable passes
             self._setRowVisible(self.regIterative[key], False)
         form.addRow(self.regIterativeBox)
         self.regInitCombo = qt.QComboBox()
@@ -100,16 +100,17 @@ class RegistrationPageMixin:
         return page
 
     def _updateRegEngine(self):
-        self.regIterativeBox.visible = True         # iterative rigid only
+        self.regIterativeBox.visible = True         # iterative (rigid or affine)
 
     def regSettings(self):
         from DynamicPETRegistration import DynamicPETRegistrationLogic, iterativeSettings
         settings = DynamicPETRegistrationLogic.defaultSettings()
         settings["initialization"] = self.regInitCombo.currentData
-        # the patient's own CT / MR: iterative rigid only (no scaling, no deformable)
+        # the patient's own CT / MR: iterative, rigid by default or affine (no deformable)
+        linear = self.regIterative["linear"].currentData or REG_LINEAR
         settings.update(iterativeSettings(self.regIterative), engine=reg.ENGINE_ITERATIVE,
-                        iterativeLinear=REG_LINEAR, iterativeDeformable=False)
-        settings["steps"] = reg.iterativeSteps(REG_LINEAR, False)
+                        iterativeLinear=linear, iterativeDeformable=False)
+        settings["steps"] = reg.iterativeSteps(linear, False)
         return settings
 
     def onRegister(self):

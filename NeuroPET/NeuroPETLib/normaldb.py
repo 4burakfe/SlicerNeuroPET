@@ -7,7 +7,9 @@ A root folder (picked in the Neuro PET Database Manager) holds one folder per da
     <root>/<database name>/
         database.json           header: name, mode (static / dynamic), kind (predefined / user defined), nuclide,
                                 tracer, space, acquisition, segmentation, reference region, smoothing, age groups,
-                                free text, statistics (subjects per group, mean / SD map files, when computed)
+                                free text, statistics (subjects per group, mean / SD map files, when computed); a
+                                dynamic database also its kinetic model ("kinetics": model, its maps, weighting,
+                                time zero, t*, time window)
         reference_mask.nii.gz   copy of the reference region mask in the template space
         subjects.csv            user defined only: one row per subject (ID, age, scan date, added, map files)
         subjects/               user defined only: the maps of each subject (PET: SUV and SUVR, SPECT: counts and
@@ -114,7 +116,7 @@ def mapTypes(modality=PET):
 
 # Regions of the workflows (a region atlas key of the atlas library: neuro.regionAtlasKey, 'CerebrA:regions'); stored
 # in the header so the subjects added and the patients compared use the same regions
-DEFAULT_REGION_ATLAS = "CerebrA:regions"       # neuro.DEFAULT_REGION_ATLAS
+DEFAULT_REGION_ATLAS = "CerebrA_PET:regions"   # neuro.DEFAULT_REGION_ATLAS (CerebrA PET, 0 mm growth)
 REGION_GROUPINGS = ("regions", "broad", "compatible")       # neuro.GROUPINGS keys (sides separate)
 
 
@@ -155,6 +157,134 @@ NORM_ENGINES = (("", "Not specified"), ("brainsfit", "BRAINSFit"), ("iterative",
 NORM_LINEAR = (("", "Not specified"), ("Rigid", "Rigid"), ("ScaleSkewVersor3D", "Rigid + scale + skew"),
                ("Affine", "Affine"))
 NORM_KEYS = ("method", "template", "engine", "linear", "deformable", "brainMask")
+# the methods of a dynamic database: its summed image is normalized (the frames follow with the same transform)
+DYNAMIC_NORM_METHODS = (("", "Not specified"), (NORM_PET, "Summed PET to MR template"),
+                        (NORM_ANATOMY, "CT/MR to MR template, same transform to the series"),
+                        (NORM_PET_TEMPLATE, "Summed PET to PET template (the database's summed images)"))
+
+# Dynamic databases: the subjects' parametric maps of a kinetic model (PET4D kinetics.parametricMaps: the same code
+# makes the subjects' maps and the patient's). Reference tissue models only: an image derived plasma input does not
+# compare between subjects. A database keeps every voxel map of its model (kinetics.VOXEL_MAPS); its primary map is
+# the one compared first. The settings that change the maps (model, weighting, time zero, t*, window, reference)
+# are fixed once a subject is in.
+# SRTM2 (the reference's k2' fixed: given, or per subject the median of its regions' SRTM fits) is the default: SRTM
+# drifts to BPnd at its bound where a target is close to a scaled copy of the reference (a white matter reference,
+# coarse early frames)
+KINETIC_MODELS = (("SRTM2", "SRTM2 (reference k2' fixed, basis functions)"),
+                  ("SRTM", "SRTM (simplified reference tissue, basis functions)"),
+                  ("LoganRef", "Logan plot (reference region)"),
+                  ("SUVR", "SUVR (ratio in a late time window)"))
+KINETIC_MAPS = {"SRTM2": ("BPnd", "R1", "k2"), "SRTM": ("BPnd", "R1", "k2"), "LoganRef": ("DVR", "BPnd"),
+                "SUVR": ("SUVR",)}
+PRIMARY_MAPS = {"SRTM2": "BPnd", "SRTM": "BPnd", "LoganRef": "BPnd", "SUVR": "SUVR"}
+DEFAULT_KINETIC_MODEL = "SRTM2"
+KINETIC_WEIGHTINGS = (("duration", "Frame duration"), ("uniform", "Uniform"),
+                      ("counts", "Frame duration / activity"))         # kinetics.WEIGHTINGS
+TIME_FIRST_FRAME, TIME_INJECTION = "first", "injection"                # DynamicPETModeling time zeros
+KINETIC_TIME_ZEROS = ((TIME_FIRST_FRAME, "Start of the first frame"), (TIME_INJECTION, "Injection time"))
+DEFAULT_TSTAR_MIN = 20.0                    # kinetics.DEFAULT_TSTAR_MIN
+SUVR_WINDOW_MINUTES = 30.0                  # no window given: the last 30 min of the series (kinetics.defaultWindow)
+DYNAMIC_ACQUISITION = {"startMinutes": 0.0, "durationMinutes": 60.0}
+# fixed once a dynamic database has a subject: they change the subjects' maps (made from series not kept)
+DYNAMIC_LOCKED_KEYS = ("kinetics", "referenceRegion", "referenceStructure", "referenceErosionMm")
+
+
+def defaultKinetics(model=DEFAULT_KINETIC_MODEL):
+    """The kinetic settings of a new dynamic database: all maps of the model, its primary map, frame duration
+    weighting, time zero at the first frame, t* (Logan) and window (SUVR; None: the last 30 min) by default."""
+    if model not in KINETIC_MAPS:
+        raise ValueError(f"Unknown kinetic model {model!r}; one of {', '.join(KINETIC_MAPS)}")
+    return {"model": model, "maps": list(KINETIC_MAPS[model]), "primaryMap": PRIMARY_MAPS[model],
+            "weighting": KINETIC_WEIGHTINGS[0][0], "timeZero": TIME_FIRST_FRAME, "tStarMin": DEFAULT_TSTAR_MIN,
+            "window": {"startMinutes": None, "endMinutes": None}, "k2ref": None, "clipNegative": True}
+
+
+def kinetics(header):
+    """The kinetic settings of a dynamic database header (the defaults filled in), None for a static one."""
+    if (header or {}).get("mode") != DYNAMIC:
+        return None
+    given = dict(header.get("kinetics") or {})
+    out = defaultKinetics(given.get("model") if given.get("model") in KINETIC_MAPS else DEFAULT_KINETIC_MODEL)
+    out.update({k: v for k, v in given.items() if k in out})
+    out["window"] = dict(defaultKinetics()["window"], **(out.get("window") or {}))
+    return out
+
+
+def kineticErrors(settings):
+    """Errors (list of str) of the kinetic settings of a dynamic database."""
+    errors = []
+    settings = settings or {}
+    model = settings.get("model")
+    if model not in KINETIC_MAPS:
+        return [f"Pick the kinetic model ({', '.join(KINETIC_MAPS)})"]
+    maps = list(settings.get("maps") or [])
+    if sorted(maps) != sorted(KINETIC_MAPS[model]):
+        errors.append(f"A {model} database keeps all of its maps: {', '.join(KINETIC_MAPS[model])}")
+    if settings.get("primaryMap") not in KINETIC_MAPS[model]:
+        errors.append(f"The primary map of a {model} database is one of {', '.join(KINETIC_MAPS[model])}")
+    if settings.get("weighting") not in dict(KINETIC_WEIGHTINGS):
+        errors.append("Unknown frame weighting")
+    if settings.get("timeZero") not in dict(KINETIC_TIME_ZEROS):
+        errors.append("Unknown time zero")
+    try:
+        tStar = float(settings.get("tStarMin"))
+    except (TypeError, ValueError):
+        tStar = -1.0
+    if model == "LoganRef" and tStar <= 0:
+        errors.append("t* of the Logan plot must be above 0 min")
+    k2ref = settings.get("k2ref")
+    if k2ref not in (None, "") and headerNumber(k2ref, -1.0) <= 0:
+        errors.append("k2' of the reference must be above 0 (or not given)")
+    window = settings.get("window") or {}
+    start, end = window.get("startMinutes"), window.get("endMinutes")
+    if model == "SUVR" and (start is None) != (end is None):
+        errors.append("Give both ends of the SUVR time window (or neither: the last 30 min)")
+    elif model == "SUVR" and start is not None and not 0 <= headerNumber(start, -1.0) < headerNumber(end, -1.0):
+        errors.append("The SUVR time window must start at or after 0 and end after it starts")
+    return errors
+
+
+def kineticOptions(settings):
+    """Options of PET4D kinetics.parametricMaps / fit from a database's kinetic settings (weighting, tStar, k2ref,
+    window (start, end) minutes or None, clipNegative)."""
+    settings = kinetics({"mode": DYNAMIC, "kinetics": settings})
+    window = settings["window"]
+    return {"weighting": settings["weighting"], "tStar": float(settings["tStarMin"]),
+            "k2ref": None if settings.get("k2ref") in (None, "") else float(settings["k2ref"]),
+            "window": (None if window.get("startMinutes") is None or window.get("endMinutes") is None
+                       else (float(window["startMinutes"]), float(window["endMinutes"]))),
+            "clipNegative": bool(settings.get("clipNegative", True))}
+
+
+def kineticsText(settings, short=False):
+    """'SRTM: BPnd, R1, k2' (short) or one line of the kinetic settings of a dynamic database."""
+    if not settings:
+        return ""
+    settings = kinetics({"mode": DYNAMIC, "kinetics": settings})
+    model = settings["model"]
+    maps = ", ".join(settings["maps"])
+    if short:
+        return f"{model}: {maps}"
+    parts = [f"{dict(KINETIC_MODELS).get(model, model)}; maps {maps} (primary {settings['primaryMap']})",
+             f"{dict(KINETIC_WEIGHTINGS).get(settings['weighting'], settings['weighting']).lower()} weighting",
+             "time zero: " + dict(KINETIC_TIME_ZEROS).get(settings["timeZero"], settings["timeZero"]).lower()]
+    if model == "LoganRef":
+        parts.append(f"t* {float(settings['tStarMin']):g} min"
+                     + (f", k2' {float(settings['k2ref']):g}/min" if settings.get("k2ref") not in (None, "") else ""))
+    if model == "SRTM2":
+        parts.append(f"k2' {float(settings['k2ref']):g}/min" if settings.get("k2ref") not in (None, "") else
+                     "k2' automatic (median of the SRTM fits)")
+    if model == "SUVR":
+        window = settings["window"]
+        parts.append(f"window {float(window['startMinutes']):g}-{float(window['endMinutes']):g} min"
+                     if window.get("startMinutes") is not None and window.get("endMinutes") is not None
+                     else f"window: the last {SUVR_WINDOW_MINUTES:g} min")
+    return ", ".join(parts)
+
+
+def normMethods(mode=STATIC):
+    """The normalization methods (key, title) of a database mode."""
+    return DYNAMIC_NORM_METHODS if mode == DYNAMIC else NORM_METHODS
 
 
 # ---------------------------------------------------------------------------
@@ -438,9 +568,10 @@ def newHeader(name, mode=STATIC, kind=USER_DEFINED, **fields):
         "tracer": "",
         "space": SPACE,
         "voxelSizeMm": VOXEL_MM,
-        "acquisition": {"startMinutes": None, "durationMinutes": None},
-        "referenceRegion": DEFAULT_REFERENCE if mode == STATIC else "",
-        "referenceStructure": DEFAULT_REFERENCE_STRUCTURE if mode == STATIC else "",
+        "acquisition": dict(DYNAMIC_ACQUISITION) if mode == DYNAMIC else {"startMinutes": None,
+                                                                          "durationMinutes": None},
+        "referenceRegion": DEFAULT_REFERENCE,
+        "referenceStructure": DEFAULT_REFERENCE_STRUCTURE,
         "referenceMask": "",
         "mapType": MAP_SUVR,
         "smoothingFwhmMm": 0.0,
@@ -456,12 +587,17 @@ def newHeader(name, mode=STATIC, kind=USER_DEFINED, **fields):
         "statistics": {"computed": None, "stale": False, "groups": {}},
         # a mean map frozen as the template of the PET to PET normalization: {"file", "made", "fromVersion", "n"}
         "normalizationTemplate": {},
+        # dynamic: the kinetic model of the subjects' maps (defaultKinetics); static: None
+        "kinetics": defaultKinetics() if mode == DYNAMIC else None,
     }
     for key, value in fields.items():
         if key not in header:
             raise KeyError(key)
         header[key] = value
-    if "mapType" not in fields:
+    if mode == DYNAMIC:         # the primary map (the one compared first) is the database's map type
+        header["kinetics"] = kinetics(header)
+        header["mapType"] = header["kinetics"]["primaryMap"]
+    elif "mapType" not in fields:
         header["mapType"] = mapTypes(header["modality"])[0]     # SUVR (PET) / Ratio (SPECT)
     return header
 
@@ -475,8 +611,15 @@ def validateHeader(header):
         errors.append("Unknown mode")
     if header.get("kind") not in dict(KINDS):
         errors.append("Unknown database kind")
+    dynamic = header.get("mode") == DYNAMIC
     if header.get("modality") not in MODALITIES:
         errors.append("Pick the modality (PET or SPECT)")
+    elif dynamic:
+        if header.get("modality") != PET:
+            errors.append("A dynamic database is a PET database")
+        errors.extend(kineticErrors(header.get("kinetics")))
+        if not errors and header.get("mapType") not in KINETIC_MAPS[header["kinetics"]["model"]]:
+            errors.append("The map type of a dynamic database is one of its model's maps")
     elif header.get("mapType") not in mapTypes(header.get("modality")):
         errors.append(f"The map type of a {header.get('modality')} database is "
                       + " or ".join(mapTypes(header.get("modality"))))
@@ -486,6 +629,8 @@ def validateHeader(header):
         errors.append("Give the nuclide")
     if header.get("mode") == STATIC and header.get("referenceRegion") not in dict(REFERENCE_REGIONS):
         errors.append("Pick the reference region of the normalization")
+    elif dynamic and header.get("referenceRegion") not in (REF_ATLAS, REF_CUSTOM):
+        errors.append("Pick the reference region of the kinetic model (a region of the region atlas or a mask file)")
     elif header.get("referenceRegion") == REF_ATLAS and not str(header.get("referenceStructure") or "").strip():
         errors.append("Pick the region of the region atlas used as the reference")
     for key, title in (("startMinutes", "start"), ("durationMinutes", "duration")):
@@ -504,7 +649,7 @@ def validateHeader(header):
         errors.append("Pick the template space")
     if header.get("growInto") is not None and header.get("growInto") not in GROW_INTO_TEXT:
         errors.append("Unknown region growth target (growInto)")
-    if (header.get("normalization") or {}).get("method", "") not in dict(NORM_METHODS):
+    if (header.get("normalization") or {}).get("method", "") not in dict(normMethods(header.get("mode"))):
         errors.append("Unknown normalization method")
     if header.get("ageStratified"):
         errors.extend(validateAgeGroups(header.get("ageGroups")))
@@ -526,6 +671,8 @@ def readHeader(folder):
     for key, value in defaults.items():
         header.setdefault(key, value)
     header["normalization"] = dict(emptyNormalization(), **(header.get("normalization") or {}))
+    if header.get("mode") == DYNAMIC:
+        header["kinetics"] = kinetics(header)
     return header
 
 
@@ -972,10 +1119,11 @@ def createDatabase(root, header):
 # Settings that can be edited after a database is made; those of a predefined database's maps stay as they are
 EDITABLE_KEYS = ("name", "modality", "nuclide", "tracer", "acquisition", "referenceRegion",
                  "referenceStructure", "referenceErosionMm", "smoothingFwhmMm", "mapType", "regionAtlas", "regionGrowMm", "growInto",
-                 "normalization", "ageStratified", "ageGroups", "scanner", "description")
+                 "normalization", "ageStratified", "ageGroups", "scanner", "description", "kinetics")
 PREDEFINED_FIXED_KEYS = ("referenceRegion", "referenceStructure", "referenceErosionMm", "smoothingFwhmMm", "mapType", "ageStratified",
                          "ageGroups")
-STATISTICS_KEYS = ("referenceRegion", "referenceStructure", "referenceErosionMm", "smoothingFwhmMm", "ageStratified", "ageGroups")
+STATISTICS_KEYS = ("referenceRegion", "referenceStructure", "referenceErosionMm", "smoothingFwhmMm", "ageStratified", "ageGroups",
+                   "kinetics")
 # of a user defined database: the regional statistics and the 3D-SSP projections (made with the mean / SD maps) are
 # those of its regions and map type
 REGION_STATISTICS_KEYS = ("regionAtlas", "regionGrowMm", "growInto", "mapType")
@@ -983,22 +1131,25 @@ REGION_STATISTICS_KEYS = ("regionAtlas", "regionGrowMm", "growInto", "mapType")
 REGION_KEYS = ("regionAtlas", "regionGrowMm", "growInto")
 
 
-def fixedKeys(header):
+def fixedKeys(header, subjects=0):
     """The settings of a database that cannot be edited: those of a predefined database's maps, and its region
-    settings when its regional statistics or regions are stored (the Review uses those, whatever the header says)."""
+    settings when its regional statistics or regions are stored (the Review uses those, whatever the header says);
+    of a dynamic database, once it has subjects, the kinetic model and the reference region (their maps were made
+    with them, from series that are not kept)."""
     if header.get("kind") != PREDEFINED:
-        return ()
+        return DYNAMIC_LOCKED_KEYS if header.get("mode") == DYNAMIC and subjects else ()
     stats = header.get("statistics") or {}
     return PREDEFINED_FIXED_KEYS + (REGION_KEYS if stats.get("regions") or stats.get("regionsSegmentation") else ())
 
 
-def editedHeader(old, new):
+def editedHeader(old, new, subjects=0):
     """(header, changes) of a database whose settings are edited: the editable keys from new (not the fixed ones of a
     predefined database), the rest (kind, mode, statistics, reference mask, version, ...) kept. changes: {"name",
     "reference" (region or erosion: the mask and the subjects' SUVR maps are to be made again), "statistics" (the
-    mean / SD maps out of date), "normalization", "keys" [changed keys]}. Raises ValueError for a header with errors."""
+    mean / SD maps out of date), "normalization", "keys" [changed keys]}. subjects: the number of subjects in it
+    (a dynamic database's kinetic settings are fixed once it has one). Raises ValueError for a header with errors."""
     header = json.loads(json.dumps(old))
-    fixed = fixedKeys(old)
+    fixed = fixedKeys(old, subjects)
     changed = []
     for key in EDITABLE_KEYS:
         if key in fixed or key not in new:
@@ -1009,6 +1160,11 @@ def editedHeader(old, new):
     header["name"] = str(header.get("name", "")).strip()
     if not header["ageStratified"]:
         header["ageGroups"] = []
+    if header.get("mode") == DYNAMIC:
+        header["kinetics"] = kinetics(header)
+        if header["mapType"] != header["kinetics"]["primaryMap"]:
+            header["mapType"] = header["kinetics"]["primaryMap"]
+            changed.append("mapType")
     errors = validateHeader(header)
     if errors:
         raise ValueError("\n".join(errors))
@@ -1053,8 +1209,8 @@ def deleteDatabase(folder, root):
 
 
 def summary(folder, header):
-    """Table row of a database: {"name", "kind", "modality", "mode", "nuclide", "tracer", "subjects", "reference",
-    "ageGroups", "created", "statistics", "version"}."""
+    """Table row of a database: {"name", "kind", "modality", "mode", "model", "nuclide", "tracer", "subjects",
+    "reference", "ageGroups", "created", "statistics", "version"}."""
     stats = header.get("statistics") or {}
     if header.get("kind") == PREDEFINED:
         state = "Predefined maps"
@@ -1071,6 +1227,7 @@ def summary(folder, header):
         "kind": dict(KINDS).get(header.get("kind"), header.get("kind", "")),
         "modality": header.get("modality", PET),
         "mode": dict(MODES).get(header.get("mode"), header.get("mode", "")),
+        "model": kineticsText(header.get("kinetics"), short=True) if header.get("mode") == DYNAMIC else "",
         "nuclide": header.get("nuclide", ""),
         "tracer": header.get("tracer", ""),
         "subjects": subjectCount(folder, header),
@@ -1102,6 +1259,21 @@ def statisticsGroups(header, subjects):
             if name is not None:
                 groups[groupKey(name)]["ids"].append(subject["id"])
     return groups
+
+
+def resampledGrid(size, spacing, newSpacing):
+    """The grid of an image resampled to an isotropic voxel size newSpacing (mm) over the same extent: (size per
+    axis, shift of the first voxel's centre per axis in mm, along the image axes). size and spacing per axis (any
+    order, the same for both)."""
+    newSpacing = float(newSpacing)
+    if newSpacing <= 0:
+        raise ValueError("The voxel size must be above 0 mm")
+    sizes, shifts = [], []
+    for n, step in zip(size, spacing):
+        extent = int(n) * float(step)
+        sizes.append(max(1, int(round(extent / newSpacing))))
+        shifts.append((newSpacing - float(step)) / 2.0)
+    return tuple(sizes), tuple(shifts)
 
 
 def gaussianSigmas(fwhmMm, spacing):

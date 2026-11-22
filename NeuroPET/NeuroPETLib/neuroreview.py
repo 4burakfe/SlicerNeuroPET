@@ -22,7 +22,7 @@ import os
 
 import numpy as np
 
-from . import normaldb
+from . import neuro, normaldb
 
 SCORE_Z, SCORE_T = "z", "t"
 SCORES = ((SCORE_T, "t (Crawford-Howell)"), (SCORE_Z, "z"))
@@ -352,9 +352,12 @@ def regionStatistics(subjectValues, groups):
 
 
 def unionMask(masks, shape):
-    """All the regions together (the brain the 3D-SSP surface is made of)."""
+    """All the regions together (the brain the 3D-SSP surface is made of), the centrum semiovale left out (deep white
+    matter: the 3D-SSP rays stop where they leave the grey matter regions, as before it was a region)."""
     union = np.zeros(shape, dtype=bool)
-    for mask in masks.values():
+    for name, mask in masks.items():
+        if neuro.isWhiteMatterSegment(name):
+            continue
         if isinstance(mask, RegionMask):
             if mask.box is not None:
                 union[mask.box] |= mask.crop

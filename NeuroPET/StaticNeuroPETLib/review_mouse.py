@@ -15,6 +15,7 @@ import slicer
 import vtk
 
 from NeuroWorkflowLib.base import _ijkToRas
+from NeuroWorkflowLib.scenestate import unsaved
 from NeuroPETLib import neuroreview as nr, ssp
 
 from StaticNeuroPETLib.constants import (CLICK_TOLERANCE_PX, MOUSE_PRIORITY, SSP_OUTLINE_ATTRIBUTE,
@@ -422,6 +423,7 @@ class ReviewMouseMixin:
                 node.SetAttribute(SSP_OUTLINE_ATTRIBUTE, "1")
                 node.SetHideFromEditors(True)
                 node.CreateDefaultDisplayNodes()
+                unsaved(node)
                 models[part] = node
             node.SetAndObservePolyData(lines)
             display = node.GetDisplayNode()
@@ -495,6 +497,7 @@ class ReviewMouseMixin:
                 node.SetAttribute(SSP_OUTLINE_ATTRIBUTE, "all")
                 node.SetHideFromEditors(True)
                 node.CreateDefaultDisplayNodes()
+                unsaved(node)
                 models[part] = node
             if node.GetPolyData() is not lines:
                 node.SetAndObservePolyData(lines)

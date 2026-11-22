@@ -113,7 +113,7 @@ class ReviewLogicMixin:
             result.setdefault("values", result["suv"])
             union = nr.unionMask(masks, values.shape)
             result.update(smoothed=ratio if result["ratio"] else values, union=union,
-                          hull=self.brainHull(union, atlas, grid), hemispheres=ssp.hemisphereMasks(masks, values.shape))
+                          hull=self.brainHull(union, atlas, grid), hemispheres=ssp.hemisphereMasks(masks, values.shape, _ijkToRas(grid)))
             return result
         grid = self.loadAtlasVolume(os.path.join(folder, group["mean"]), name=f"{header['name']} mean ({groupKey})")
         sdNode = self.loadAtlasVolume(os.path.join(folder, group["sd"]), name=f"{header['name']} SD ({groupKey})")
@@ -163,7 +163,7 @@ class ReviewLogicMixin:
         smoothed = normaldb.smoothMap(values, fwhm, spacing)
         union = nr.unionMask(masks, mean.shape)
         result.update(smoothed=smoothed, union=union, hull=self.brainHull(union, atlas, grid),
-                      hemispheres=ssp.hemisphereMasks(masks, mean.shape))
+                      hemispheres=ssp.hemisphereMasks(masks, mean.shape, _ijkToRas(grid)))
         result["z"] = nr.scoreMap(smoothed, mean, sd, mask, nr.SCORE_Z)
         result["brightness"] = nr.petBrightness(values)     # the patient's map (not smoothed) as brightness
         result["gm"] = None         # the MNI grey matter probability on the grid: the score slices' default mask

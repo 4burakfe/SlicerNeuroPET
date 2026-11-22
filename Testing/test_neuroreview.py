@@ -353,6 +353,8 @@ def test_region_mask_box_matches_full_arrays():
     assert list(a) == list(b)
     assert all((math.isnan(a[k]) and math.isnan(b[k])) or a[k] == b[k] for k in a)       # the same values, bit for bit
     assert np.array_equal(nr.unionMask(full, shape), nr.unionMask(boxed, shape))
+    deep = np.ones(shape, dtype=bool)                   # the centrum semiovale is no part of the 3D-SSP brain
+    assert np.array_equal(nr.unionMask(dict(full, **{"Centrum Semiovale R": deep}), shape), nr.unionMask(full, shape))
     la, lb = nr.labelMap(full, shape), nr.labelMap(boxed, shape)
     assert la[1] == lb[1] and np.array_equal(la[0], lb[0])
     assert nr.masksSignature(full) == nr.masksSignature(boxed)

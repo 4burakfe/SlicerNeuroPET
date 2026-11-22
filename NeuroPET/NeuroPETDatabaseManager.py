@@ -14,7 +14,10 @@ picked by the user (one folder per database, see NeuroPETLib/normaldb.py for the
                         Download predefined...      the predefined databases published on GitHub Releases
                                                     (NeuroPETLib/dbdownload.py), installed or updated
                         Delete database             the folder removed from disk, after a warning
-    Dynamic tab     to come
+    Dynamic tab     the dynamic databases (parametric maps of a kinetic model: SRTM BPnd / R1 / k2, Logan DVR,
+                    SUVR) in the same table, with Create new database, Edit settings, Delete and Open folder (the
+                    model and the reference are fixed once a subject is in); adding subjects and the mean / SD
+                    come next
 
 The reference region mask is copied into every database: made from the CerebrA atlas or the MNI brain mask of the
 Neuro atlas folder (the one of the Dynamic Neuro Receptor PET module), or a mask file of the user.
@@ -51,6 +54,10 @@ SETTINGS_BATCH_FOLDER = "DICOMGatedDynamicPET/NeuroDatabase/BatchFolder"
 COLUMNS = (("name", "Name"), ("kind", "Type"), ("modality", "Modality"), ("nuclide", "Nuclide"), ("tracer", "Tracer"),
            ("subjects", "Subjects"), ("reference", "Reference region"), ("ageGroups", "Age groups"),
            ("statistics", "Mean / SD"), ("version", "Version"), ("created", "Created"))
+DYNAMIC_COLUMNS = (("name", "Name"), ("kind", "Type"), ("nuclide", "Nuclide"), ("tracer", "Tracer"),
+                   ("model", "Model and maps"), ("subjects", "Subjects"), ("reference", "Reference region"),
+                   ("ageGroups", "Age groups"), ("statistics", "Mean / SD"), ("version", "Version"),
+                   ("created", "Created"))
 DEFAULT_SMOOTHING_MM = 8.0
 
 
@@ -188,8 +195,9 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
         (header referenceStructure: 'Cerebellum Gray Matter' takes 'Cerebellum Gray Matter R' and '... L')."""
         from DynamicNeuroPET import DynamicNeuroPETLogic
         name = str(header.get("referenceStructure") or "").strip()
-        if neuro.isWhiteMatterReference(name):      # of the space, not of the region atlas
-            mask, labelsPath = DynamicNeuroPETLogic().whiteMatterReferenceMask(neuro.atlasFiles(header.get("space")))
+        if neuro.isWhiteMatterReference(name):      # drawn in the segmentation, else of the space
+            mask, labelsPath = DynamicNeuroPETLogic().whiteMatterReferenceMask(
+                neuro.atlasFiles(header.get("space")), header.get("regionAtlas") or normaldb.DEFAULT_REGION_ATLAS)
             source = slicer.util.loadLabelVolume(labelsPath, {"show": False})
             return self._saveReferenceMask(folder, header, source, mask)
         kind = neuro.mergedRegionAtlas(header.get("regionAtlas") or normaldb.DEFAULT_REGION_ATLAS)
@@ -214,7 +222,8 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
             if not sameCustom:
                 self.writeReferenceMask(folder, header, customMask)
             normaldb.writeHeader(folder, header)
-            self.recomputeRatios(folder, header, progress)
+            if header.get("mode") != normaldb.DYNAMIC:     # dynamic: fixed once there are subjects
+                self.recomputeRatios(folder, header, progress)
         else:
             normaldb.writeHeader(folder, header)
         return folder
@@ -485,7 +494,8 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
                 shape = next(iter(masks.values())).shape
                 # the regions with every CerebrA structure (not hollow when the region atlas leaves some out)
                 hull = logic.brainHull(nr.unionMask(masks, shape), atlas, gridNode)
-                surface = logic.reviewSurface(hull, gridNode, hemispheres=ssp.hemisphereMasks(masks, shape))
+                surface = logic.reviewSurface(hull, gridNode, hemispheres=ssp.hemisphereMasks(
+                    masks, shape, _ijkToRasOf(gridNode)))
             except Exception as error:
                 logging.exception("Neuro DB: could not make the 3D-SSP surface")
                 return masks, None, f"No 3D-SSP projections: the surface could not be made ({error})."
@@ -543,10 +553,12 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
 class HeaderForm:
     """Fields of a database header: name, nuclide, tracer, acquisition, template space, region atlas (segmentation and
     grouping), reference region, smoothing, map type (predefined), scanner and description, age groups (with maps and
-    subjects for a predefined one)."""
+    subjects for a predefined one); of a dynamic database (mode) also its kinetic model."""
 
-    def __init__(self, layout, predefined=False):
+    def __init__(self, layout, predefined=False, mode=normaldb.STATIC):
         self.predefined = predefined
+        self.mode = mode
+        dynamic = mode == normaldb.DYNAMIC
         self.widget = qt.QWidget()
         layout.addWidget(self.widget)
         outer = qt.QVBoxLayout(self.widget)
@@ -555,12 +567,14 @@ class HeaderForm:
         box = qt.QGroupBox("Database")
         form = qt.QFormLayout(box)
         self.nameEdit = qt.QLineEdit()
-        self.nameEdit.placeholderText = "e.g. FDG normals 2026"
+        self.nameEdit.placeholderText = "e.g. UCB-J normals 2026" if dynamic else "e.g. FDG normals 2026"
         self.nameEdit.toolTip = "The database folder is named after it."
         form.addRow("Name:", self.nameEdit)
         self.modalityCombo = qt.QComboBox()
         self.modalityCombo.addItems(list(normaldb.MODALITIES))
-        self.modalityCombo.toolTip = "PET (SUV / SUVR maps) or SPECT (counts / ratio maps)."
+        self.modalityCombo.toolTip = ("PET (SUV / SUVR maps) or SPECT (counts / ratio maps)." if not dynamic else
+                                      "A dynamic database is a PET database.")
+        self.modalityCombo.enabled = not dynamic
         form.addRow("Modality:", self.modalityCombo)
         self.nuclideCombo = qt.QComboBox()
         self.nuclideCombo.editable = True
@@ -576,17 +590,21 @@ class HeaderForm:
         self.startSpin.setRange(0, 100000)
         self.startSpin.setDecimals(1)
         self.startSpin.suffix = " min p.i."
-        self.startSpin.value = 60
+        self.startSpin.value = normaldb.DYNAMIC_ACQUISITION["startMinutes"] if dynamic else 60
         self.durationSpin = qt.QDoubleSpinBox()
         self.durationSpin.setRange(0, 100000)
         self.durationSpin.setDecimals(1)
         self.durationSpin.suffix = " min"
-        self.durationSpin.value = 10
+        self.durationSpin.value = normaldb.DYNAMIC_ACQUISITION["durationMinutes"] if dynamic else 10
         acquisition.addWidget(qt.QLabel("start"))
         acquisition.addWidget(self.startSpin)
         acquisition.addWidget(qt.QLabel("duration"))
         acquisition.addWidget(self.durationSpin)
-        form.addRow("Acquisition:", acquisition)
+        if dynamic:
+            for spin in (self.startSpin, self.durationSpin):
+                spin.toolTip = ("The dynamic protocol of the normals (the series' start after the injection and "
+                                "its length): a patient's series is compared with it.")
+        form.addRow("Protocol:" if dynamic else "Acquisition:", acquisition)
         spaceRow = qt.QHBoxLayout()
         self.spaceCombo = qt.QComboBox()
         for space in neuro.listSpaces():
@@ -606,7 +624,9 @@ class HeaderForm:
         form.addRow(self.spaceInfo)
         outer.addWidget(box)
 
-        refBox = qt.QGroupBox("Normalization")
+        if dynamic:
+            self._buildKinetics(outer)
+        refBox = qt.QGroupBox("Reference region and regions" if dynamic else "Normalization")
         refForm = qt.QFormLayout(refBox)
         self.segmentationCombo = qt.QComboBox()
         self.segmentationCombo.toolTip = ("Segmentation the regions come from (those of the space: the extension's "
@@ -618,9 +638,14 @@ class HeaderForm:
                                       "Broad (Compatible). The reference region is one of its regions.")
         refForm.addRow("Grouping:", self.groupingCombo)
         self.referenceCombo = qt.QComboBox()
-        self.referenceCombo.toolTip = ("Region the images are divided by (SUVR): the whole brain, a region of the "
+        self.referenceCombo.toolTip = (("Reference region of the kinetic model (no specific binding): a region of the "
+                                        "segmentation and grouping above (both sides together), the centrum "
+                                        "semiovale (drawn in CerebrA and CerebrA PET: for tracers binding in "
+                                        "all grey matter, e.g. [11C]UCB-J) or a custom mask file. Its mask is copied "
+                                        "into the database.") if dynamic else
+                                       "Region the images are divided by (SUVR): the whole brain, a region of the "
                                        "segmentation and grouping above (both sides together), the centrum semiovale "
-                                       "(white matter above the lateral ventricles, from the space's white matter "
+                                       "(drawn in CerebrA and CerebrA PET, else from the space's white matter "
                                        "map: for tracers binding in all grey matter, e.g. [11C]UCB-J) or a custom mask "
                                        "file. Its mask is copied into the database.")
         refForm.addRow("Reference region:", self.referenceCombo)
@@ -688,7 +713,7 @@ class HeaderForm:
                 combo.addItem(title, key)
             return combo
 
-        self.normMethodCombo = choiceCombo(normaldb.NORM_METHODS)
+        self.normMethodCombo = choiceCombo(normaldb.normMethods(mode))
         normForm.addRow("Method:", self.normMethodCombo)
         self.databaseVolumes, self.databaseName = {}, ""        # the database edited: its own ('From DB') volumes
         self.normTemplateCombo = qt.QComboBox()
@@ -770,6 +795,137 @@ class HeaderForm:
         self.nuclideCombo.connect("currentTextChanged(QString)", self._updateTracers)
         self._updateModality()
 
+    # --- kinetic model (dynamic) ------------------------------------------------------------------------
+    def _buildKinetics(self, outer):
+        box = qt.QGroupBox("Kinetic model")
+        box.toolTip = ("How the subjects' parametric maps are made (PET4D kinetic modeling, the same code for the "
+                       "patients compared): fixed once a subject is in, as the series are not kept.")
+        form = qt.QFormLayout(box)
+        self.modelCombo = qt.QComboBox()
+        for key, title in normaldb.KINETIC_MODELS:
+            self.modelCombo.addItem(title, key)
+        self.modelCombo.toolTip = ("Reference tissue models only (an image derived plasma input does not compare "
+                                   "between subjects). SRTM (default): BPnd, R1 and k2 maps by basis functions; "
+                                   "Logan plot: DVR and BPnd from t* on; SUVR: the ratio in a late time window.")
+        form.addRow("Model:", self.modelCombo)
+        self.mapsLabel = qt.QLabel()
+        self.mapsLabel.toolTip = "The database keeps every voxel map of its model."
+        form.addRow("Maps kept:", self.mapsLabel)
+        self.primaryMapCombo = qt.QComboBox()
+        self.primaryMapCombo.toolTip = "The map compared first (the others can be picked in Compare)."
+        form.addRow("Primary map:", self.primaryMapCombo)
+        self.weightingCombo = qt.QComboBox()
+        for key, title in normaldb.KINETIC_WEIGHTINGS:
+            self.weightingCombo.addItem(title, key)
+        self.weightingCombo.toolTip = "Weights of the frames in the fits"
+        form.addRow("Frame weighting:", self.weightingCombo)
+        self.timeZeroCombo = qt.QComboBox()
+        for key, title in normaldb.KINETIC_TIME_ZEROS:
+            self.timeZeroCombo.addItem(title, key)
+        self.timeZeroCombo.toolTip = ("t = 0 of the curves: the start of the first frame (a series started at the "
+                                      "injection) or the injection time in the PET's tags.")
+        form.addRow("Time zero:", self.timeZeroCombo)
+        self.tStarSpin = qt.QDoubleSpinBox()
+        self.tStarSpin.setRange(0.5, 600)
+        self.tStarSpin.setDecimals(1)
+        self.tStarSpin.suffix = " min"
+        self.tStarSpin.value = normaldb.DEFAULT_TSTAR_MIN
+        self.tStarSpin.toolTip = "Logan plot: the linear part from t* on (the same for every voxel and subject)"
+        self.tStarLabel = qt.QLabel("t*:")
+        form.addRow(self.tStarLabel, self.tStarSpin)
+        self.k2refSpin = qt.QDoubleSpinBox()
+        self.k2refSpin.setRange(0, 10)
+        self.k2refSpin.setDecimals(4)
+        self.k2refSpin.singleStep = 0.01
+        self.k2refSpin.suffix = " /min"
+        self.k2refSpin.specialValueText = "Not used"
+        self.k2refSpin.toolTip = "Logan plot: k2' of the reference region (optional term; 0: not used)"
+        self.k2refLabel = qt.QLabel("k2' (reference):")
+        form.addRow(self.k2refLabel, self.k2refSpin)
+        windowRow = qt.QHBoxLayout()
+        self.windowCheck = qt.QCheckBox("from")
+        self.windowCheck.toolTip = (f"SUVR: the time window of the ratio; unticked, the last "
+                                    f"{normaldb.SUVR_WINDOW_MINUTES:g} min of each series")
+        self.windowStartSpin = qt.QDoubleSpinBox()
+        self.windowEndSpin = qt.QDoubleSpinBox()
+        for spin, value in ((self.windowStartSpin, 40.0), (self.windowEndSpin, 60.0)):
+            spin.setRange(0, 1000)
+            spin.setDecimals(1)
+            spin.suffix = " min"
+            spin.value = value
+        windowRow.addWidget(self.windowCheck)
+        windowRow.addWidget(self.windowStartSpin)
+        windowRow.addWidget(qt.QLabel("to"))
+        windowRow.addWidget(self.windowEndSpin)
+        self.windowWidget = qt.QWidget()
+        self.windowWidget.setLayout(windowRow)
+        windowRow.setContentsMargins(0, 0, 0, 0)
+        self.windowLabel = qt.QLabel("Time window:")
+        form.addRow(self.windowLabel, self.windowWidget)
+        outer.addWidget(box)
+        self.modelCombo.connect("currentIndexChanged(int)", lambda i: self._updateModel())
+        self.windowCheck.connect("toggled(bool)", lambda on: self._updateModel(keepPrimary=True))
+        self._updateModel()
+
+    def _updateModel(self, keepPrimary=False, primary=None):
+        """The maps of the model picked and the settings it uses."""
+        model = self.modelCombo.currentData or normaldb.DEFAULT_KINETIC_MODEL
+        maps = normaldb.KINETIC_MAPS[model]
+        self.mapsLabel.text = ", ".join(maps)
+        current = primary or (self.primaryMapCombo.currentText if keepPrimary else normaldb.PRIMARY_MAPS[model])
+        self.primaryMapCombo.clear()
+        self.primaryMapCombo.addItems(list(maps))
+        self.primaryMapCombo.setCurrentIndex(max(0, self.primaryMapCombo.findText(current)))
+        for widget in (self.tStarLabel, self.tStarSpin):
+            widget.visible = model == "LoganRef"
+        for widget in (self.k2refLabel, self.k2refSpin):
+            widget.visible = model in ("LoganRef", "SRTM2")
+        self.k2refSpin.specialValueText = "Automatic" if model == "SRTM2" else "Not used"
+        self.k2refSpin.toolTip = (
+            "SRTM2: k2' of the reference region, the same for every region; 0: automatic, per subject the median "
+            "k2' of its regions' SRTM fits" if model == "SRTM2" else
+            "Logan plot: k2' of the reference region (optional term; 0: not used)")
+        for widget in (self.windowLabel, self.windowWidget):
+            widget.visible = model == "SUVR"
+        self.windowStartSpin.enabled = self.windowEndSpin.enabled = bool(self.windowCheck.checked)
+
+    def kinetics(self):
+        """The kinetic settings of the form (dynamic), None for a static database."""
+        if self.mode != normaldb.DYNAMIC:
+            return None
+        model = self.modelCombo.currentData or normaldb.DEFAULT_KINETIC_MODEL
+        settings = normaldb.defaultKinetics(model)
+        window = ({"startMinutes": float(self.windowStartSpin.value), "endMinutes": float(self.windowEndSpin.value)}
+                  if model == "SUVR" and self.windowCheck.checked else {"startMinutes": None, "endMinutes": None})
+        settings.update(primaryMap=self.primaryMapCombo.currentText, weighting=self.weightingCombo.currentData,
+                        timeZero=self.timeZeroCombo.currentData, tStarMin=float(self.tStarSpin.value),
+                        k2ref=float(self.k2refSpin.value) if self.k2refSpin.value > 0 else None, window=window)
+        return settings
+
+    def _setKinetics(self, settings, fixed=False):
+        settings = normaldb.kinetics({"mode": normaldb.DYNAMIC, "kinetics": settings})
+        self.modelCombo.blockSignals(True)
+        self.modelCombo.setCurrentIndex(max(0, self.modelCombo.findData(settings["model"])))
+        self.modelCombo.blockSignals(False)
+        for combo, value in ((self.weightingCombo, settings["weighting"]), (self.timeZeroCombo, settings["timeZero"])):
+            combo.setCurrentIndex(max(0, combo.findData(value)))
+        self.tStarSpin.value = float(settings["tStarMin"])
+        self.k2refSpin.value = float(settings["k2ref"] or 0)
+        window = settings["window"]
+        given = window.get("startMinutes") is not None and window.get("endMinutes") is not None
+        self.windowCheck.blockSignals(True)
+        self.windowCheck.checked = given
+        self.windowCheck.blockSignals(False)
+        if given:
+            self.windowStartSpin.value = float(window["startMinutes"])
+            self.windowEndSpin.value = float(window["endMinutes"])
+        self._updateModel(primary=settings["primaryMap"])
+        if fixed:
+            for widget in (self.modelCombo, self.primaryMapCombo, self.weightingCombo, self.timeZeroCombo,
+                           self.tStarSpin, self.k2refSpin, self.windowCheck, self.windowStartSpin,
+                           self.windowEndSpin):
+                widget.enabled = False
+
     # --- modality, nuclide, tracer --------------------------------------------------------------------
     def _updateModality(self):
         modality = self.modalityCombo.currentText
@@ -850,7 +1006,7 @@ class HeaderForm:
         return self.spaceCombo.currentData or normaldb.SPACE
 
     def regionAtlasKey(self):
-        return neuro.regionAtlasKey(self.segmentationCombo.currentData or neuro.DEFAULT_SEGMENTATION,
+        return neuro.regionAtlasKey(self.segmentationCombo.currentData or neuro.DEFAULT_REGION_SEGMENTATION,
                                     self.groupingCombo.currentData or neuro.REGIONS)
 
     def _fillSegmentations(self, keep=None):
@@ -865,7 +1021,7 @@ class HeaderForm:
                                                 neuro.CT_TEMPLATE_GM: "CT_GM"}.get(k, k) for k in volumes))
         else:
             self.spaceInfo.text = "<span style='color:#c0392b'>No template space in the atlas folders.</span>"
-        current = keep or self.segmentationCombo.currentData or neuro.DEFAULT_SEGMENTATION
+        current = keep or self.segmentationCombo.currentData or neuro.DEFAULT_REGION_SEGMENTATION
         combo = self.segmentationCombo
         combo.blockSignals(True)
         combo.clear()
@@ -897,7 +1053,8 @@ class HeaderForm:
         try:
             kind = neuro.mergedRegionAtlas(self.regionAtlasKey())
             names = neuro.referenceRegionNames(neuro.regionTable(kind)[0], neuro.referenceGroups(kind))
-            if names and "WM" in neuro.atlasFiles(self.spaceId()):     # of the space: the centrum semiovale
+            drawn = any(neuro.isWhiteMatterSegment(n) for n in names)     # the region 'Centrum Semiovale'
+            if names and not drawn and "WM" in neuro.atlasFiles(self.spaceId()):    # of the space: the rule
                 names.append(neuro.WHITE_MATTER_REFERENCE)
             return names
         except Exception:       # noqa: BLE001 - shown as a list without atlas regions
@@ -913,8 +1070,12 @@ class HeaderForm:
         current = keep if keep is not None else combo.itemData(combo.currentIndex)
         combo.blockSignals(True)
         combo.clear()
-        combo.addItem(normaldb.referenceTitle(normaldb.REF_GLOBAL), normaldb.REF_GLOBAL)
+        if self.mode != normaldb.DYNAMIC:      # a kinetic model's reference is a region (no specific binding)
+            combo.addItem(normaldb.referenceTitle(normaldb.REF_GLOBAL), normaldb.REF_GLOBAL)
         names = self._atlasRegionNames()
+        legacy = neuro.WHITE_MATTER_REFERENCE
+        if current == f"{normaldb.REF_ATLAS}:{legacy}" and legacy not in names:
+            names.append(legacy)        # a database made with it keeps it
         for name in names:
             combo.addItem(name, f"{normaldb.REF_ATLAS}:{name}")
         combo.addItem(normaldb.referenceTitle(normaldb.REF_CUSTOM), normaldb.REF_CUSTOM)
@@ -1015,8 +1176,10 @@ class HeaderForm:
         self._updateAge()
         self.scannerEdit.text = header.get("scanner", "")
         self.descriptionEdit.setPlainText(header.get("description", ""))
+        if self.mode == normaldb.DYNAMIC:
+            self._setKinetics(header.get("kinetics"), fixed="kinetics" in fixed)
         self._updateReference()
-        widgets = {"referenceRegion": [self.referenceCombo], "referenceErosionMm": [self.erosionSpin],
+        widgets = {"referenceRegion": [self.referenceCombo, self.maskPath], "referenceErosionMm": [self.erosionSpin],
                    "smoothingFwhmMm": [self.smoothingSpin],
                    "regionAtlas": [self.segmentationCombo, self.groupingCombo], "regionGrowMm": [self.growSpin],
                    "growInto": [self.growIntoCombo],
@@ -1125,7 +1288,9 @@ class HeaderForm:
         )
         if self.predefined:
             fields["mapType"] = self.mapTypeCombo.currentText
-        return normaldb.newHeader(self.nameEdit.text.strip(), normaldb.STATIC,
+        if self.mode == normaldb.DYNAMIC:
+            fields["kinetics"] = self.kinetics()
+        return normaldb.newHeader(self.nameEdit.text.strip(), self.mode,
                                   normaldb.PREDEFINED if self.predefined else normaldb.USER_DEFINED, **fields)
 
 
@@ -1174,13 +1339,14 @@ def _error(parent, text):
 # Widget
 # ---------------------------------------------------------------------------
 class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
-    """Database folder on top, the Static / Dynamic tabs below: the table of the databases, details of the selected
-    one and the database buttons."""
+    """Database folder on top, the Static / Dynamic tabs below: the table of the databases of the tab's mode, details
+    of the selected one and the database buttons (one page, shown under either tab)."""
 
     def setup(self):
         ScriptedLoadableModuleWidget.setup(self)
         self.logic = NeuroPETDatabaseManagerLogic()
-        self.databases = []         # [(folder, header)] of the static table
+        self.databases = []         # [(folder, header)] of the table (the databases of the tab's mode)
+        self.mode = normaldb.STATIC
         self.layout.addWidget(MergenBanner())       # the Mergen banner at the top of the panel
 
         rootBox = qt.QGroupBox("Database folder")
@@ -1195,16 +1361,28 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         rootLayout.addWidget(self.rootInfo)
         self.layout.addWidget(rootBox)
 
-        self.tabs = qt.QTabWidget()
-        self.layout.addWidget(self.tabs, 1)
-        self.tabs.addTab(self._buildStaticTab(), "Static")
-        dynamic = qt.QLabel("Dynamic databases (BPnd and other parametric maps) come next.")
-        dynamic.wordWrap = True
-        dynamic.alignment = qt.Qt.AlignTop
-        self.tabs.addTab(dynamic, "Dynamic")
+        # the Static / Dynamic tabs: one page (table, details, buttons) showing the databases of the tab's mode
+        self.modeTabs = qt.QTabBar()
+        for _, title in normaldb.MODES:
+            self.modeTabs.addTab(title)
+        self.modeTabs.toolTip = ("Static: SUV / SUVR (or SPECT) maps of one image per subject. Dynamic: parametric "
+                                 "maps of a kinetic model (BPnd, R1, ...) of a dynamic series per subject.")
+        self.layout.addWidget(self.modeTabs)
+        self.layout.addWidget(self._buildStaticTab(), 1)
 
         self.rootPath.connect("currentPathChanged(QString)", self._onRootChanged)
+        self.modeTabs.connect("currentChanged(int)", self._onModeChanged)
         self.refresh()
+
+    def _onModeChanged(self, index):
+        self.mode = normaldb.MODES[index][0] if 0 <= index < len(normaldb.MODES) else normaldb.STATIC
+        self.refresh()
+
+    def _columns(self):
+        return DYNAMIC_COLUMNS if self.mode == normaldb.DYNAMIC else COLUMNS
+
+    def _modeTitle(self):
+        return dict(normaldb.MODES)[self.mode].lower()
 
     def _buildStaticTab(self):
         page = qt.QWidget()
@@ -1283,6 +1461,16 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         grid.addWidget(self.refreshButton, 5, 1)
         grid.addWidget(self.downloadButton, 6, 0, 1, 2)
         layout.addLayout(grid)
+        # not (yet) for dynamic databases: shown under the Static tab only
+        self.staticOnlyButtons = (self.predefinedButton, self.downloadButton, self.exportButton,
+                                  self.addSubjectsButton, self.normalizeAgainButton, self.buildTemplateButton,
+                                  self.statsButton, self.removeSubjectsButton)
+        self.dynamicNote = qt.QLabel("Dynamic databases: create, edit, delete. Adding subjects (BIDS series and from "
+                                     "the Dynamic Neuro workflow), the mean / SD maps and the predefined databases "
+                                     "come next.")
+        self.dynamicNote.wordWrap = True
+        self.dynamicNote.visible = False
+        layout.addWidget(self.dynamicNote)
 
         self.table.connect("itemSelectionChanged()", self._updateSelection)
         self.createButton.connect("clicked()", self.onCreate)
@@ -1310,13 +1498,23 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
 
     def refresh(self, select=None):
         root = self.root()
-        self.databases, errors = normaldb.listDatabases(root, normaldb.STATIC)
+        self.databases, errors = normaldb.listDatabases(root, self.mode)
+        columns = self._columns()
+        if getattr(self, "_tableMode", normaldb.STATIC) != self.mode:     # the columns of the mode
+            self._tableMode = self.mode
+            self.table.clearContents()
+            self.table.setColumnCount(len(columns))
+            self.table.setHorizontalHeaderLabels([title for _, title in columns])
+        dynamic = self.mode == normaldb.DYNAMIC
+        for button in self.staticOnlyButtons:
+            button.visible = not dynamic
+        self.dynamicNote.visible = dynamic
         if not root:
             self.rootInfo.text = "Pick the folder that holds (or will hold) the databases."
         elif not os.path.isdir(root):
             self.rootInfo.text = "The folder does not exist."
         else:
-            text = f"{len(self.databases)} static database(s)."
+            text = f"{len(self.databases)} {self._modeTitle()} database(s)."
             if errors:
                 text += " Unreadable: " + ", ".join(os.path.basename(f) for f, _ in errors)
                 for folder, error in errors:
@@ -1326,7 +1524,7 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         selectRow = -1
         for row, (folder, header) in enumerate(self.databases):
             summary = normaldb.summary(folder, header)
-            for column, (key, _) in enumerate(COLUMNS):
+            for column, (key, _) in enumerate(columns):
                 item = qt.QTableWidgetItem(str(summary[key]))
                 if key == "statistics" and summary[key] == "Out of date":
                     item.setForeground(qt.QBrush(qt.QColor("#c8553d")))
@@ -1402,8 +1600,8 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         rows = [
             ("Folder", folder),
             ("Space", f"{neuro.spaceTitle(header.get('space'))}, {header.get('voxelSizeMm', '')} mm"),
-            ("Acquisition", f"start {acquisition.get('startMinutes')} min p.i., duration "
-                            f"{acquisition.get('durationMinutes')} min"),
+            ("Protocol" if header.get("mode") == normaldb.DYNAMIC else "Acquisition",
+             f"start {acquisition.get('startMinutes')} min p.i., duration {acquisition.get('durationMinutes')} min"),
             ("Reference", normaldb.referenceTitle(header)
              + (f" (mask {header.get('referenceMask')})" if header.get("referenceMask") else " (no mask)")),
             ("Reference erosion", f"{mm(header.get('referenceErosionMm'))} mm"),
@@ -1412,7 +1610,11 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
                         + (f" ({normaldb.GROW_INTO_TEXT[normaldb.growInto(header)]})"
                            if normaldb.GROW_INTO_TEXT[normaldb.growInto(header)] else "")),
             ("Spatial normalization", normaldb.normalizationText(header.get("normalization"))),
-            ("Maps", f"{header.get('mapType')}, smoothing {mm(header.get('smoothingFwhmMm'))} mm FWHM"),
+            ("Kinetic model", normaldb.kineticsText(header.get("kinetics"))
+             if header.get("mode") == normaldb.DYNAMIC else ""),
+            ("Maps", (", ".join((header.get("kinetics") or {}).get("maps") or []) + f" (primary {header.get('mapType')})"
+                      if header.get("mode") == normaldb.DYNAMIC else header.get("mapType"))
+             + f", smoothing {mm(header.get('smoothingFwhmMm'))} mm FWHM"),
             ("Scanner", header.get("scanner")),
             ("Description", "below" if str(header.get("description") or "").strip() else ""),
         ]
@@ -1433,13 +1635,18 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
 
     # --- buttons -------------------------------------------------------------------------------------
     def onCreate(self):
-        dialog, layout, buttons = _scrollDialog("Create new static database", slicer.util.mainWindow())
-        info = qt.QLabel("An empty user defined database. Subjects are added later from the Neuro workflow ("
+        dynamic = self.mode == normaldb.DYNAMIC
+        dialog, layout, buttons = _scrollDialog(f"Create new {self._modeTitle()} database", slicer.util.mainWindow())
+        info = qt.QLabel(("An empty user defined dynamic database: the parametric maps of its kinetic model are made "
+                          "for every subject added (from the dynamic series, which are not kept) and its mean / SD "
+                          "maps computed from them. The model and the reference region are fixed once a subject is "
+                          "in.") if dynamic else
+                         "An empty user defined database. Subjects are added later from the Neuro workflow ("
                          "Add patient to database); their maps are copied into the database and its mean / SD maps "
                          "computed.")
         info.wordWrap = True
         layout.addWidget(info)
-        form = HeaderForm(layout, predefined=False)
+        form = HeaderForm(layout, predefined=False, mode=self.mode)
         layout.addStretch(1)
         create = buttons.addButton("Create", qt.QDialogButtonBox.AcceptRole)
         buttons.addButton(qt.QDialogButtonBox.Cancel)
@@ -1757,18 +1964,28 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         predefined = old.get("kind") == normaldb.PREDEFINED
         dialog, layout, buttons = _scrollDialog(f"Edit '{old.get('name')}'", slicer.util.mainWindow())
         count = normaldb.subjectCount(folder, old)
-        info = qt.QLabel(
-            ("A predefined database: the settings of its mean / SD maps (reference region, smoothing, age groups) "
-             "stay as they are" + (", and so do its regions (stored with its statistics)."
-                                   if "regionAtlas" in normaldb.fixedKeys(old) else ".") if predefined else
-             f"{count} subject(s). A new reference region (or erosion) makes the reference mask again and the SUVR "
-             "maps of the subjects from their SUV maps; reference, smoothing or age group changes put the mean / SD "
-             "maps out of date. A new name renames the folder."))
+        dynamic = old.get("mode") == normaldb.DYNAMIC
+        fixed = normaldb.fixedKeys(old, count)
+        if dynamic and not predefined:
+            text = (f"{count} subject(s): the kinetic model and the reference region are fixed (the subjects' maps "
+                    "were made with them, from series that are not kept). " if count else
+                    "No subject yet: every setting can be changed; the kinetic model and the reference region are "
+                    "fixed once a subject is in. ") + ("Smoothing or age group changes put the mean / SD maps out of "
+                                                        "date. A new name renames the folder.")
+        elif predefined:
+            text = ("A predefined database: the settings of its mean / SD maps (reference region, smoothing, age "
+                    "groups) stay as they are" + (", and so do its regions (stored with its statistics)."
+                                                  if "regionAtlas" in fixed else "."))
+        else:
+            text = (f"{count} subject(s). A new reference region (or erosion) makes the reference mask again and the "
+                    "SUVR maps of the subjects from their SUV maps; reference, smoothing or age group changes put the "
+                    "mean / SD maps out of date. A new name renames the folder.")
+        info = qt.QLabel(text)
         info.wordWrap = True
         layout.addWidget(info)
-        form = HeaderForm(layout, predefined=False)
+        form = HeaderForm(layout, predefined=False, mode=old.get("mode") or normaldb.STATIC)
         form.databaseVolumes, form.databaseName = normaldb.databaseVolumes(folder, old), old.get("name", "")
-        form.setHeader(old, normaldb.fixedKeys(old))
+        form.setHeader(old, fixed)
         layout.addStretch(1)
         save = buttons.addButton("Save", qt.QDialogButtonBox.AcceptRole)
         buttons.addButton(qt.QDialogButtonBox.Cancel)
@@ -1777,7 +1994,7 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
 
         def accept():
             try:
-                header, changes = normaldb.editedHeader(old, form.header())
+                header, changes = normaldb.editedHeader(old, form.header(), count)
             except ValueError as error:
                 _error(dialog, str(error))
                 return
@@ -1798,7 +2015,7 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
                         return
                 notes.append("The reference mask is made again" + (f" and the SUVR maps of the {count} subject(s) "
                                                                    "computed again from their SUV maps"
-                                                                   if count else "") + ".")
+                                                                   if count and not dynamic else "") + ".")
             if changes["statistics"] and (old.get("statistics") or {}).get("computed"):
                 notes.append("The mean / SD maps become out of date.")
             if changes["normalization"] and count and not predefined:
@@ -1816,7 +2033,7 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         if not _execDialog(dialog) or not done:
             return
         progressDialog = None
-        if done["changes"]["reference"] and count and not predefined:
+        if done["changes"]["reference"] and count and not predefined and not dynamic:
             progressDialog = slicer.util.createProgressDialog(windowTitle="Edit database", maximum=count,
                                                               labelText="SUVR maps...")
 

@@ -10,18 +10,16 @@ import logging
 import os
 
 import numpy as np
-import qt
 import slicer
 
 from DICOMGatedDynamicPETLib import resampling
 from NeuroWorkflowLib.base import NeuroWorkflowLogic, NEURO_PREFIX, _ijkToRas, _vtkMatrix
+from NeuroWorkflowLib.database import DatabaseFolderLogicMixin
 from NeuroPETLib import neuro, normaldb, neuroreview as nr, staticneuro as sn
 
-from StaticNeuroPETLib.constants import SETTINGS_DB_ROOT
 
-
-class DatabaseLogicMixin:
-    """The logic database methods of StaticNeuroPETLogic."""
+class DatabaseLogicMixin(DatabaseFolderLogicMixin):
+    """The logic database methods of StaticNeuroPETLogic (the database folder: NeuroWorkflowLib.database)."""
 
     # --- adding a patient to a normal database --------------------------------------------------
     def addSubject(self, folder, header, volume, subjectId, gridPath, age, sex, normalization, replace=False,
@@ -281,6 +279,7 @@ class DatabaseLogicMixin:
         if settings["referenceMaskPath"]:
             arguments["referenceMaskPath"] = settings["referenceMaskPath"]
             arguments["referenceName"] = settings["referenceTitle"] or "Reference"
+            arguments.update(sn.referenceMaskDrop(settings))
         elif settings["referenceAtlasRegion"]:
             arguments["referenceName"] = settings["referenceAtlasRegion"]
         else:       # as the Regions step: never the default reference region in place of the database's
@@ -419,21 +418,3 @@ class DatabaseLogicMixin:
             if found:
                 return found, "the database's subjects (these regions)"
         return None, "approximate (from the mean / SD maps)"
-
-    # --- normal databases ------------------------------------------------------------------------
-    @staticmethod
-    def databaseRoot():
-        """The database folder of the Database Manager, else its default one (~/NeuroPET/Databases)."""
-        return str(qt.QSettings().value(SETTINGS_DB_ROOT) or "") or normaldb.defaultRootFolder()
-
-    @staticmethod
-    def setDatabaseRoot(folder):
-        qt.QSettings().setValue(SETTINGS_DB_ROOT, folder or "")
-
-    @staticmethod
-    def databases(root, info):
-        """[(folder, header, rank, problems)] of the static databases of root, those fitting the image first."""
-        found, errors = normaldb.listDatabases(root, normaldb.STATIC)
-        for folder, error in errors:
-            logging.warning(f"Static Neuro: database {folder} not readable: {error}")
-        return sn.sortDatabases(found, info)

@@ -3,6 +3,10 @@ NeuroWorkflowLib: the step-by-step workflow shared by the Neuro modules (Slicer 
 
     base        logic (normalization, atlas regions) and widget (steps, toolbar, Data / Normalization / Regions
                 pages, embedded PET4D panels) of DynamicNeuroPET and StaticNeuroPET
+    scenestate  the workflow saved with the scene: the step and module shown, the layouts known at startup, the
+                workflow opened again on its step when a saved scene is loaded
+    database    the normal database: folder and list, the pick on the Normalization page, the Regions page locked
+                to its region settings, the regions step views
 
 Pure numpy code that can be tested without Slicer stays in NeuroPETLib.
 """
@@ -12,7 +16,7 @@ from NeuroPETLib import requireBaseExtension
 requireBaseExtension()     # PET4D (DICOMGatedDynamicPETLib) importable before any file here is imported
 
 # in reload order (a file before the files that import it)
-MODULES = ("base",)
+MODULES = ("scenestate", "base", "database")
 
 
 def reloadModules():

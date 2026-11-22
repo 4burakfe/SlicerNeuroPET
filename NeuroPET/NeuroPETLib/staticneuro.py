@@ -263,6 +263,15 @@ def regionSettings(folder, header):
     }
 
 
+def referenceMaskDrop(settings):
+    """loadAtlasRegions() keyword arguments for a database's reference mask (regionSettings): an atlas region's mask
+    replaces that region's own regions (found in the atlas, not in the eroded mask: dropReferenceRegions,
+    referenceMembers); a global or custom mask overlaps the regions (their own segment, no region left out)."""
+    if settings.get("referenceRegion") == normaldb.REF_ATLAS and settings.get("referenceStructure"):
+        return {"referenceMembers": settings["referenceStructure"]}
+    return {"dropReferenceRegions": False}
+
+
 def settingsText(settings):
     """One line per setting of regionSettings(), for the page."""
     grow = settings["growMm"]

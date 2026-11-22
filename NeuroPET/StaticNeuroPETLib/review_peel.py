@@ -14,6 +14,7 @@ import vtk
 
 from DICOMGatedDynamicPETLib import colormaps
 from NeuroWorkflowLib.base import _ijkToRas, _vtkMatrix
+from NeuroWorkflowLib.scenestate import unsaved
 from NeuroPETLib import neuroreview as nr, peel
 
 from StaticNeuroPETLib.constants import MOUSE_PRIORITY, PEEL_ATTRIBUTE, PEEL_NODE_PREFIX, SSP_SETUP_DELAY_MS
@@ -91,6 +92,7 @@ class ReviewPeelMixin:
             node = scene.AddNewNodeByClass(className, f"{PEEL_NODE_PREFIX} {name}")
             node.SetAttribute(PEEL_ATTRIBUTE, name)
             node.SetHideFromEditors(True)
+            unsaved(node)       # made again from the comparison
             nodes[name] = node
         return node
 

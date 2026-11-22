@@ -737,3 +737,76 @@ def test_subject_folder_backup_and_restore(tmp_path):
     state = normaldb.backupSubjectFolder(folder, "s1")           # added: the copy dropped, the new files kept
     normaldb.dropSubjectBackup(folder, state)
     assert os.path.isdir(own) and not os.path.exists(os.path.join(folder, normaldb.BACKUP_DIR))
+
+
+def dynamicHeader(name="UCB-J normals", **fields):
+    fields.setdefault("nuclide", "C-11")
+    fields.setdefault("tracer", "UCB-J")
+    return normaldb.newHeader(name, normaldb.DYNAMIC, normaldb.USER_DEFINED, **fields)
+
+
+def test_dynamic_header(tmp_path):
+    h = dynamicHeader()
+    assert normaldb.validateHeader(h) == []
+    assert h["kinetics"]["model"] == "SRTM2" and h["kinetics"]["maps"] == ["BPnd", "R1", "k2"]
+    assert h["mapType"] == "BPnd" and h["referenceRegion"] == normaldb.REF_ATLAS
+    assert "k2' automatic" in normaldb.kineticsText(h["kinetics"])
+    assert h["acquisition"] == normaldb.DYNAMIC_ACQUISITION
+    assert header()["kinetics"] is None and normaldb.kinetics(header()) is None
+    # the model's maps, all of them; the primary map is the map type
+    logan = dynamicHeader(kinetics=normaldb.defaultKinetics("LoganRef"))
+    assert logan["mapType"] == "BPnd" and logan["kinetics"]["maps"] == ["DVR", "BPnd"]
+    assert normaldb.validateHeader(logan) == []
+    bad = dynamicHeader(kinetics=dict(normaldb.defaultKinetics(), maps=["BPnd"], weighting="x"))
+    errors = normaldb.validateHeader(bad)
+    assert any("all of its maps" in e for e in errors) and any("weighting" in e for e in errors)
+    assert any("PET" in e for e in normaldb.validateHeader(dynamicHeader(modality=normaldb.SPECT)))
+    assert any("reference region" in e for e in normaldb.validateHeader(
+        dynamicHeader(referenceRegion=normaldb.REF_GLOBAL)))
+    suvr = normaldb.defaultKinetics("SUVR")
+    suvr["window"] = {"startMinutes": 40, "endMinutes": None}
+    assert any("both ends" in e for e in normaldb.kineticErrors(suvr))
+    suvr["window"] = {"startMinutes": 50, "endMinutes": 40}
+    assert any("end after" in e for e in normaldb.kineticErrors(suvr))
+    suvr["window"] = {"startMinutes": 40, "endMinutes": 60}
+    assert normaldb.kineticErrors(suvr) == []
+    assert normaldb.kineticOptions(suvr)["window"] == (40.0, 60.0)
+    assert normaldb.kineticOptions(normaldb.defaultKinetics())["window"] is None
+    assert normaldb.kineticOptions(dict(normaldb.defaultKinetics("LoganRef"), tStarMin=30, k2ref="0.2")) == {
+        "weighting": "duration", "tStar": 30.0, "k2ref": 0.2, "window": None, "clipNegative": True}
+    assert normaldb.kineticErrors(dict(normaldb.defaultKinetics("LoganRef"), tStarMin=0))
+    assert normaldb.kineticsText(h["kinetics"], short=True) == "SRTM2: BPnd, R1, k2"
+    assert "last 30 min" in normaldb.kineticsText(normaldb.defaultKinetics("SUVR"))
+    # on disk: listed as dynamic only, the kinetics read back (missing keys filled)
+    root = str(tmp_path)
+    folder = normaldb.createDatabase(root, h)
+    normaldb.createDatabase(root, header(name="FDG"))
+    assert [x["name"] for _, x in normaldb.listDatabases(root, normaldb.DYNAMIC)[0]] == ["UCB-J normals"]
+    assert [x["name"] for _, x in normaldb.listDatabases(root, normaldb.STATIC)[0]] == ["FDG"]
+    saved = json.load(open(normaldb.headerPath(folder), encoding="utf-8"))
+    del saved["kinetics"]["clipNegative"]
+    normaldb.writeHeader(folder, saved)
+    assert normaldb.readHeader(folder)["kinetics"]["clipNegative"] is True
+    assert normaldb.summary(folder, normaldb.readHeader(folder))["model"] == "SRTM2: BPnd, R1, k2"
+    assert normaldb.summary(folder, header())["model"] == ""
+
+
+def test_dynamic_edit_locks_kinetics_with_subjects():
+    old = dynamicHeader()
+    old["statistics"]["computed"] = "2026-11-21T10:00:00"
+    logan = normaldb.defaultKinetics("LoganRef")
+    h, changes = normaldb.editedHeader(old, dict(old, kinetics=logan))
+    assert h["kinetics"]["model"] == "LoganRef" and h["mapType"] == "BPnd" and changes["statistics"]
+    assert h["statistics"]["stale"] is True
+    h, changes = normaldb.editedHeader(old, dict(old, kinetics=dict(old["kinetics"], primaryMap="R1")))
+    assert h["mapType"] == "R1" and "mapType" in changes["keys"]
+    # once a subject is in: the model and the reference stay (the maps were made with them)
+    assert set(normaldb.fixedKeys(old, 1)) >= {"kinetics", "referenceStructure"} and normaldb.fixedKeys(old) == ()
+    h, changes = normaldb.editedHeader(old, dict(old, kinetics=logan, referenceStructure="Pons", scanner="HRRT"),
+                                       subjects=3)
+    assert h["kinetics"]["model"] == "SRTM2" and h["referenceStructure"] == old["referenceStructure"]
+    assert changes["keys"] == ["scanner"]
+    assert normaldb.fixedKeys(header(), 3) == ()
+    with pytest.raises(ValueError):
+        normaldb.editedHeader(old, dict(old, kinetics=dict(old["kinetics"], model="Patlak")))
+    assert dict(normaldb.normMethods(normaldb.DYNAMIC))[normaldb.NORM_PET].startswith("Summed")
