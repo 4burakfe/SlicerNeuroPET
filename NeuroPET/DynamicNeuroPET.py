@@ -482,7 +482,7 @@ class DynamicNeuroPETTest(ScriptedLoadableModuleTest):
         widget = slicer.modules.dynamicneuropet.widgetRepresentation().self()
         self.assertEqual([k for k, *_ in widget.STEPS][-1], STEP_COMPARE)
         self.assertFalse(widget.REVIEW_MEAN_MASK)
-        self.assertEqual(widget._defaultReviewLayout(), nr.LAYOUT_SLICES)
+        self.assertEqual(widget._defaultReviewLayout(), nr.LAYOUT_SINGLE)
         self.assertIsNone(widget.reviewVolume())            # no maps yet
         for key, _, _, _ in DYNAMIC_STEPS:
             widget.showStep(key, enterStep=False)

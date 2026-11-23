@@ -674,7 +674,7 @@ class ComparePageMixin:
 
     @staticmethod
     def _defaultReviewLayout():
-        return nr.LAYOUT_SLICES
+        return nr.LAYOUT_SINGLE     # slices, 3D-SSP and table
 
     def _initPetWindow(self, percentile=True):
         """The map's window: 0 to its 99.5th percentile (BPnd is clipped at 100 in a few voxels)."""
