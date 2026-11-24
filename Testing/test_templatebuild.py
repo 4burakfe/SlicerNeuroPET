@@ -73,3 +73,20 @@ def test_pass_taken_back(tmp_path):
     np.testing.assert_allclose(np.asarray(document["current"]["matrix"]).reshape(4, 4), _affine(1.1))
     assert document["current"]["target"] == "MNI target" and document["source"] == "/x/sub-1_pet.nii.gz"
     tb.dropPass(folder, "nobody", 1)                             # no file: nothing
+
+
+def test_scaled_mean_of_summed_images():
+    mask = np.zeros((4, 4, 4), bool)
+    mask[1:3, 1:3, 1:3] = True
+    a = np.where(mask, 10.0, 1.0)
+    b = np.where(mask, 1000.0, 100.0)      # 100 times the activity: the same shape after the scaling
+    mean, count = tb.scaledMean([a, b], mask)
+    assert count == 2 and mean.dtype == np.float32
+    assert np.allclose(mean[mask], tb.SUMMED_SCALE) and np.allclose(mean[~mask], tb.SUMMED_SCALE / 10)
+    mean, count = tb.scaledMean([a, np.zeros_like(a)])          # an empty image is left out
+    assert count == 1
+    try:
+        tb.scaledMean([np.zeros((2, 2, 2))])
+        raise AssertionError("no image: an error")
+    except ValueError:
+        pass

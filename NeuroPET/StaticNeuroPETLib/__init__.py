@@ -20,6 +20,7 @@ StaticNeuroPETLib: the parts of the Static Neuro PET/SPECT module (StaticNeuroPE
     review_peel          unfolded brain
     review_layout        layouts, second monitor, review views, outlines
     review_mouse         hover names, right drag window, 3D-SSP outlines
+    report               the PDF report (its layout and drawing: NeuroPETLib.neuroreport)
 
 The logic and widget files hold mixin classes (methods only); StaticNeuroPET.py makes StaticNeuroPETLogic and
 StaticNeuroPETWidget from them. Pure numpy code that can be tested without Slicer stays in NeuroPETLib.
@@ -32,4 +33,5 @@ requireBaseExtension()     # PET4D (DICOMGatedDynamicPETLib) importable before a
 # in reload order (a file before the files that import it)
 MODULES = ("constants", "helpers", "logic_image", "logic_database", "logic_review", "logic_batch", "toolbar",
            "page_data", "page_registration", "page_normalization", "page_regions", "review_page", "review_colors",
-           "review_table", "review_ssp", "review_cut", "review_peel", "review_layout", "review_mouse")
+           "review_table", "review_ssp", "review_cut", "review_peel", "review_layout", "review_mouse",
+           "report")

@@ -1053,6 +1053,18 @@ class HeaderForm:
         windowRow.setContentsMargins(0, 0, 0, 0)
         self.windowLabel = qt.QLabel("Time window:")
         form.addRow(self.windowLabel, self.windowWidget)
+        self.seriesSmoothingSpin = qt.QDoubleSpinBox()
+        self.seriesSmoothingSpin.setRange(-0.5, 20.0)
+        self.seriesSmoothingSpin.setDecimals(1)
+        self.seriesSmoothingSpin.singleStep = 0.5
+        self.seriesSmoothingSpin.suffix = " mm FWHM"
+        self.seriesSmoothingSpin.specialValueText = "Not set (the first subject sets it)"
+        self.seriesSmoothingSpin.value = -0.5
+        self.seriesSmoothingSpin.toolTip = (
+            "The Data step's smoothing of the frames the subjects are made with (0: none), before the maps' own "
+            "smoothing (Smoothing, above). Not locked: a subject or patient made with another one is only warned "
+            "about (Add series, Review/Compare).")
+        form.addRow("Series smoothing:", self.seriesSmoothingSpin)
         outer.addWidget(box)
         self.modelCombo.connect("currentIndexChanged(int)", lambda i: self._updateModel())
         self.windowCheck.connect("toggled(bool)", lambda on: self._updateModel(keepPrimary=True))
@@ -1369,6 +1381,8 @@ class HeaderForm:
         self.descriptionEdit.setPlainText(header.get("description", ""))
         if self.mode == normaldb.DYNAMIC:
             self._setKinetics(header.get("kinetics"), fixed="kinetics" in fixed)
+            series = normaldb.seriesSmoothing(header)
+            self.seriesSmoothingSpin.value = -0.5 if series is None else series
         self._updateReference()
         widgets = {"referenceRegion": [self.referenceCombo, self.maskPath], "referenceErosionMm": [self.erosionSpin],
                    "smoothingFwhmMm": [self.smoothingSpin],
@@ -1481,6 +1495,8 @@ class HeaderForm:
             fields["mapType"] = self.mapTypeCombo.currentText
         if self.mode == normaldb.DYNAMIC:
             fields["kinetics"] = self.kinetics()
+            series = float(self.seriesSmoothingSpin.value)
+            fields["seriesSmoothingFwhmMm"] = None if series < 0 else series
         return normaldb.newHeader(self.nameEdit.text.strip(), self.mode,
                                   normaldb.PREDEFINED if self.predefined else normaldb.USER_DEFINED, **fields)
 
@@ -1653,11 +1669,27 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         grid.addWidget(self.downloadButton, 6, 0, 1, 2)
         layout.addLayout(grid)
         # not (yet) for dynamic databases: shown under the Static tab only
-        self.staticOnlyButtons = (self.predefinedButton, self.downloadButton, self.exportButton,
-                                  self.addSubjectsButton, self.normalizeAgainButton, self.buildTemplateButton)
-        self.dynamicNote = qt.QLabel("Dynamic databases: subjects are added from the Review/Compare step of the "
-                                     "Dynamic Neuro workflow. Adding BIDS series here, the template and the predefined "
-                                     "databases come next.")
+        self.staticOnlyButtons = (self.predefinedButton, self.downloadButton, self.exportButton)
+        # the batch buttons do the dynamic version under the Dynamic tab (their texts: _setBatchButtonTexts)
+        self._batchTexts = {
+            normaldb.STATIC: [(b, b.text, b.toolTip) for b in (self.addSubjectsButton, self.normalizeAgainButton,
+                                                                 self.buildTemplateButton)],
+            normaldb.DYNAMIC: [
+                (self.addSubjectsButton, "1. Add series (BIDS)...",
+                 "Add normal subjects from their dynamic series (BIDS 4D PET with its .json): each is smoothed with the "
+                 "database's series smoothing, motion corrected, its summed image normalized with the database's "
+                 "settings, the database's regions loaded and the maps of its kinetic model made, then added with a "
+                 "QC picture. Patients are added from the Dynamic Neuro workflow (Review/Compare: Add to database)."),
+                (self.normalizeAgainButton, "2. Process again from the series...",
+                 "Make the subjects added from a series file again with the database's current settings (e.g. after "
+                 "its template of the summed images was made), replacing their maps."),
+                (self.buildTemplateButton, "3. Template of the summed images...",
+                 "The mean of the subjects' normalized summed images (each scaled to the same mean in the brain) "
+                 "becomes the database's normalization template: summed PET to PET template. Then process the "
+                 "subjects again with it.")]}
+        self.dynamicNote = qt.QLabel("Dynamic databases: normal subjects are added from their BIDS series here (1-3), "
+                                     "patients from the Review/Compare step of the Dynamic Neuro workflow. The "
+                                     "predefined dynamic databases come next.")
         self.dynamicNote.wordWrap = True
         self.dynamicNote.visible = False
         layout.addWidget(self.dynamicNote)
@@ -1698,6 +1730,9 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         dynamic = self.mode == normaldb.DYNAMIC
         for button in self.staticOnlyButtons:
             button.visible = not dynamic
+        for button, text, tip in self._batchTexts[self.mode if dynamic else normaldb.STATIC]:
+            button.text = text
+            button.toolTip = tip
         self.dynamicNote.visible = dynamic
         if not root:
             self.rootInfo.text = "Pick the folder that holds (or will hold) the databases."
@@ -1753,6 +1788,10 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         self.statsButton.enabled = userDefined and count > 0
         self.normalizeAgainButton.enabled = userDefined and have > 0
         self.buildTemplateButton.enabled = userDefined and have > 1
+        if userDefined and normaldb.isDynamic(header):
+            subjects = normaldb.readSubjects(folder)
+            self.normalizeAgainButton.enabled = any(s.get("sourceFile") for s in subjects)
+            self.buildTemplateButton.enabled = sum(1 for s in subjects if s.get("suvFile")) > 1
         self.details.setHtml(self._detailsHtml(folder, header) if folder else "")
         self.credits.setHtml(credits.databaseHtml(header, "Select a database.") if folder else "")
 
@@ -2387,6 +2426,9 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         folder, header = self.selected()
         if not folder or header.get("kind") != normaldb.USER_DEFINED:
             return
+        if normaldb.isDynamic(header):
+            self.onAddDynamicSeries(folder, header)
+            return
         logic = StaticNeuroPETLogic()
         try:
             plan, _ = logic.batchPlan(header, folder)
@@ -2552,6 +2594,9 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         folder, header = self.selected()
         if not folder or header.get("kind") != normaldb.USER_DEFINED:
             return
+        if normaldb.isDynamic(header):
+            self.onProcessDynamicAgain(folder, header)
+            return
         have, count = normaldb.nativeCount(folder)
         if not have:
             _error(slicer.util.mainWindow(), "No subject has its native image in the database.")
@@ -2583,6 +2628,9 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         from NeuroPETLib import templatebuild as tb
         folder, header = self.selected()
         if not folder or header.get("kind") != normaldb.USER_DEFINED:
+            return
+        if normaldb.isDynamic(header):
+            self.onBuildSummedTemplate(folder, header)
             return
         have, count = normaldb.nativeCount(folder)
         if have < count:
@@ -2665,6 +2713,228 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
                    if used.get("built") == "iterative" and rows else "")
                 + f"\n\nLog: {logPath}\n\nCheck the QC pictures, then compute the mean / SD maps.")
         slicer.util.infoDisplay(text, windowTitle="Build template")
+
+    # --- dynamic databases: normal subjects from their BIDS series, the template of the summed images -------------
+    def _dynamicBatchCheck(self, folder, header):
+        """(plan, notes) of a batch into a dynamic database, or None after an error (no kinetic model, no template
+        for PET to PET, no reference region)."""
+        from DynamicNeuroPET import DynamicNeuroPETLogic
+        errors = normaldb.kineticErrors(normaldb.kinetics(header))
+        if errors:
+            _error(slicer.util.mainWindow(), "Set the database's kinetic settings first (Edit settings):\n- "
+                   + "\n- ".join(errors))
+            return None
+        logic = DynamicNeuroPETLogic()
+        try:
+            plan, _, notes = logic.dynamicBatchPlan(folder, header)
+            logic.batchRegionArguments(folder, header)
+        except ValueError as error:
+            _error(slicer.util.mainWindow(), str(error))
+            return None
+        return plan, notes
+
+    def onAddDynamicSeries(self, folder, header):
+        from DynamicNeuroPET import DynamicNeuroPETLogic
+        checked = self._dynamicBatchCheck(folder, header)
+        if checked is None:
+            return
+        plan, planNotes = checked
+        dialog, layout, buttons = _scrollDialog(f"Add series to '{header.get('name')}'", slicer.util.mainWindow())
+        dialog.resize(720, 600)
+        info = qt.QLabel(
+            "Adds normal subjects from a BIDS folder of dynamic PET series (sub-<id>[_ses-<session>]_pet.nii[.gz] "
+            "4D, with the .json of its frame times; participants.tsv for age and sex). Each series goes through the "
+            "Dynamic Neuro steps without a manual check, with the database's settings: its frames smoothed (series "
+            "smoothing below), motion corrected (every frame to the summed image, iterative rigid), the summed image "
+            "stored as it is (native, subjects/<id>/) and normalized with the database's normalization, the series "
+            "resampled onto the template, the database's regions and reference region loaded, the regions fitted and "
+            "the voxel maps made with its kinetic settings, then the maps, the normalized summed image and the TAC "
+            "fits saved. The series file is remembered, so that the subject can be made again later (e.g. after the "
+            "template of the summed images). Subject IDs already in the database are skipped unless 'replace' is "
+            "ticked; a subject that fails is logged and the batch goes on. A series takes minutes.")
+        info.wordWrap = True
+        info.textFormat = qt.Qt.PlainText
+        layout.addWidget(info)
+        form = qt.QFormLayout()
+        layout.addLayout(form)
+        bids = self._bidsPicker(form)
+        smoothingSpin = qt.QDoubleSpinBox()
+        smoothingSpin.setRange(0.0, 20.0)
+        smoothingSpin.decimals = 1
+        smoothingSpin.singleStep = 0.5
+        smoothingSpin.suffix = " mm FWHM"
+        smoothingSpin.specialValueText = "None"
+        known = normaldb.seriesSmoothing(header)
+        smoothingSpin.value = known if known is not None else 0.0
+        smoothingSpin.toolTip = ("The Data step's smoothing of the frames (Gaussian, before the motion correction). "
+                                 "Keep the database's: its subjects and the patients compared with it are best made "
+                                 "with one smoothing.")
+        form.addRow("Series smoothing:", smoothingSpin)
+        smoothingNote = qt.QLabel()
+        smoothingNote.wordWrap = True
+        form.addRow(smoothingNote)
+        spaceLabel = qt.QLabel(neuro.spaceTitle(header.get("space")))
+        form.addRow("Space:", spaceLabel)
+        kineticsLabel = qt.QLabel(normaldb.kineticsText(normaldb.kinetics(header)))
+        kineticsLabel.wordWrap = True
+        form.addRow("Kinetics:", kineticsLabel)
+        normLabel = qt.QLabel(normaldb.normalizationText(plan)
+                              + (" to the database's template of the summed images"
+                                 if plan.get("method") == normaldb.NORM_PET_TEMPLATE else "")
+                              + "".join(f" ({n})" for n in planNotes))
+        normLabel.wordWrap = True
+        form.addRow("Normalization:", normLabel)
+        qcCheck = qt.QCheckBox("Save a QC picture of each subject (summed image over the MNI T1, 3 slices) in qc/")
+        qcCheck.checked = True
+        form.addRow(qcCheck)
+        replaceCheck = qt.QCheckBox("Subjects already in the database: add them again (replace)")
+        form.addRow(replaceCheck)
+        found = qt.QLabel()
+        found.wordWrap = True
+        form.addRow(found)
+        layout.addStretch(1)
+        run = buttons.addButton("Run", qt.QDialogButtonBox.AcceptRole)
+        buttons.addButton(qt.QDialogButtonBox.Cancel)
+        buttons.connect("rejected()", dialog.reject)
+        state = {"items": []}
+
+        def update(*args):
+            items = DynamicNeuroPETLogic.batchItems(folder, bids["files"], None)
+            state["items"] = items
+            ids = [i[1] for i in items]
+            existing = sum(1 for i in ids if normaldb.hasSubject(folder, i))
+            duplicates = len(ids) - len(set(i.lower() for i in ids))
+            replace = bool(replaceCheck.checked)
+            found.text = (f"{len(items)} series" + (f", {existing} already in the database ("
+                                                    + ("added again" if replace else "skipped") + ")"
+                                                    if existing else "")
+                          + (f"; {duplicates} subject(s) appear twice: pick one session" if duplicates else "") + ".")
+            warning = normaldb.seriesSmoothingWarning(header, float(smoothingSpin.value))
+            smoothingNote.text = (f"<span style='color:#c0392b'>{warning}</span>" if warning else
+                                  ("The database's series smoothing." if known is not None else
+                                   "The database has no series smoothing yet: the first subject sets it."))
+            run.enabled = duplicates == 0 and (len(items) > existing or (replace and len(items) > 0))
+
+        bids["changed"] = update
+        replaceCheck.connect("toggled(bool)", update)
+        smoothingSpin.connect("valueChanged(double)", update)
+        bids["scan"]()
+        result = {}
+
+        def accept():
+            atlas = self._atlasOrAsk(folder, dialog)
+            if not atlas:
+                return
+            result.update(items=list(state["items"]), atlas=atlas, qc=bool(qcCheck.checked),
+                          replace=bool(replaceCheck.checked), smoothing=float(smoothingSpin.value))
+            qt.QSettings().setValue(SETTINGS_BATCH_FOLDER, bids["folderEdit"].currentPath)
+            dialog.accept()
+
+        run.connect("clicked()", accept)
+        if not _execDialog(dialog) or not result.get("items"):
+            return
+        self._runDynamicBatch(folder, result["items"], result["atlas"], result["qc"], result["replace"],
+                              "Add series", result["smoothing"])
+
+    def _runDynamicBatch(self, folder, items, atlas, qc, replace, title, smoothing=None):
+        """Run DynamicNeuroPETLogic.batchAddDynamic on batch items and report it."""
+        from DynamicNeuroPET import DynamicNeuroPETLogic
+        progressDialog, progress = self._progressDialog(title, len(items))
+        try:
+            rows, logPath, stopped = DynamicNeuroPETLogic().batchAddDynamic(folder, items, atlas, qc, progress,
+                                                                            replace, smoothing)
+        except Exception as error:
+            logging.exception(f"{title} failed")
+            _closeProgress(progressDialog, free=False)
+            _error(slicer.util.mainWindow(), f"{title} could not start:\n{error}")
+            return
+        finally:
+            _closeProgress(progressDialog)
+            self.logic.forgetLoaded(folder)
+            self.refresh(select=folder)
+        counts = {status: sum(1 for r in rows if r["status"] == status)
+                  for status in ("added", "skipped", "failed", "stopped")}
+        text = (f"Done {counts['added']}, skipped {counts['skipped']}, failed {counts['failed']}"
+                + (" - stopped" if stopped else "") + f".\n\nLog: {logPath}"
+                + ("\nQC pictures: " + os.path.join(folder, "qc") if qc else "")
+                + "\n\nCheck the QC pictures, remove the badly normalized subjects, then make the template of the "
+                  "summed images (and process the subjects again with it) or compute the mean / SD maps.")
+        failed = [r for r in rows if r["status"] == "failed"]
+        if failed:
+            text += "\n\nFailed:\n" + "\n".join(f"{r['id']}: {r['message']}" for r in failed[:10])
+            if len(failed) > 10:
+                text += f"\n... ({len(failed) - 10} more in the log)"
+        slicer.util.infoDisplay(text, windowTitle=title)
+
+    def onProcessDynamicAgain(self, folder, header):
+        from DynamicNeuroPET import DynamicNeuroPETLogic
+        checked = self._dynamicBatchCheck(folder, header)
+        if checked is None:
+            return
+        plan, planNotes = checked
+        items, missing = DynamicNeuroPETLogic.batchItemsOfSources(folder)
+        if not items:
+            _error(slicer.util.mainWindow(), "No subject was added from a series file that is still there.")
+            return
+        smoothing = normaldb.seriesSmoothing(header) or 0.0
+        text = (f"Make the {len(items)} subject(s) of '{header.get('name')}' again from their series files, with the "
+                f"database's current settings:\n\nNormalization: {normaldb.normalizationText(plan)}"
+                + (" to its template of the summed images" if plan.get("method") == normaldb.NORM_PET_TEMPLATE else "")
+                + "".join(f" ({n})" for n in planNotes)
+                + f"\nSeries smoothing: {normaldb.seriesSmoothingText(smoothing)}"
+                + f"\nKinetics: {normaldb.kineticsText(normaldb.kinetics(header))}"
+                + "\n\nTheir maps, summed images and TAC fits are replaced."
+                + (f"\n\n{len(missing)} subject(s) have no series file (patients added from the workflow, or the file "
+                   "moved) and stay as they are: " + ", ".join(missing[:8]) + (", ..." if len(missing) > 8 else "")
+                   if missing else ""))
+        if not slicer.util.confirmOkCancelDisplay(text, windowTitle="Process again"):
+            return
+        atlas = self._atlasOrAsk(folder)
+        if not atlas:
+            return
+        self._runDynamicBatch(folder, items, atlas, True, True, "Process again", smoothing)
+
+    def onBuildSummedTemplate(self, folder, header):
+        from DynamicNeuroPET import DynamicNeuroPETLogic
+        subjects = [s for s in normaldb.readSubjects(folder) if s.get("suvFile")]
+        if len(subjects) < 2:
+            _error(slicer.util.mainWindow(), "The template needs the summed images of two subjects at least.")
+            return
+        old = header.get("normalizationTemplate") or {}
+        text = (f"Make the normalization template of '{header.get('name')}' from the normalized summed images of its "
+                f"{len(subjects)} subjects: each scaled to the same mean in the brain, then averaged. It becomes the "
+                "database's normalization (summed PET to PET template); the target the subjects were registered to "
+                f"first ({neuro.templateTitle(normaldb.normalizationTarget(header))}) is kept."
+                + (f"\n\nIt replaces the current template ({old.get('file')}, {old.get('n') or '?'} subjects)."
+                   if old.get("file") else "")
+                + "\n\nThe subjects keep their maps until they are processed again with it.")
+        if not slicer.util.confirmOkCancelDisplay(text, windowTitle="Template of the summed images"):
+            return
+        atlas = self._atlasOrAsk(folder)
+        if not atlas:
+            return
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        try:
+            header, count = DynamicNeuroPETLogic().buildSummedTemplate(folder, atlas)
+        except Exception as error:
+            logging.exception("The template of the summed images failed")
+            _error(slicer.util.mainWindow(), f"The template could not be made:\n{error}")
+            return
+        finally:
+            qt.QApplication.restoreOverrideCursor()
+            self.logic.forgetLoaded(folder)
+            self.refresh(select=folder)
+        items, _ = DynamicNeuroPETLogic.batchItemsOfSources(folder)
+        if not items:
+            slicer.util.infoDisplay(f"The template of {count} summed images is the database's normalization template. "
+                                    "No subject has a series file to be made again with it.",
+                                    windowTitle="Template of the summed images")
+            return
+        if slicer.util.confirmYesNoDisplay(
+                f"The template of {count} summed images is the database's normalization template.\n\nProcess the "
+                f"{len(items)} subject(s) with a series file again now, normalized to it (summed PET to PET)? This "
+                "takes a few minutes per subject.", windowTitle="Template of the summed images"):
+            self.onProcessDynamicAgain(folder, normaldb.readHeader(folder))
 
     def onRemoveSubjects(self):
         folder, header = self.selected()

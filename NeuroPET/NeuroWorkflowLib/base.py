@@ -1133,6 +1133,10 @@ class NeuroWorkflowLogic(ScriptedLoadableModuleLogic):
                 referenceId = self._replaceSegments(target, segmentation, labelNode, referenceId)
                 scene.RemoveNode(segmentation)
                 segmentation = target
+            try:            # Burak 2026-11-25: the segments listed by name
+                self.sortSegmentsByName(segmentation)
+            except Exception:
+                logging.warning("Neuro: could not sort the segments by name", exc_info=True)
             segmentation.SetAttribute(NEURO_PREFIX + "Atlas", os.path.basename(labelsPath))
             display = segmentation.GetDisplayNode()
             if display is not None:
@@ -1335,6 +1339,30 @@ class NeuroWorkflowLogic(ScriptedLoadableModuleLogic):
                 if segment.GetName().startswith("Label") or not segment.GetName():
                     segment.SetName(name)
                     segment.SetColor(*color)
+
+    @staticmethod
+    def segmentNameKey(name):
+        """Sort key of a segment's name: the reference region last, else case-insensitive with the numbers by value
+        ('Region 2' before 'Region 10')."""
+        import re
+        name = str(name or "")
+        return (name.endswith(REFERENCE_SUFFIX),
+                [(0, int(part)) if part.isdigit() else (1, part) for part in re.split(r"(\d+)", name.lower()) if part])
+
+    @staticmethod
+    def sortSegmentsByName(segmentation):
+        """The segments of a segmentation in the order of their names (segmentNameKey; the IDs and the label values
+        stay as they are)."""
+        seg = segmentation.GetSegmentation()
+        if not hasattr(seg, "SetSegmentIndex"):
+            return
+        ids = NeuroWorkflowLogic.segmentIds(segmentation)
+        ordered = sorted(ids, key=lambda i: NeuroWorkflowLogic.segmentNameKey(seg.GetSegment(i).GetName()))
+        if ordered == ids:
+            return
+        for index, segmentId in enumerate(ordered):
+            if seg.GetSegmentIndex(segmentId) != index:
+                seg.SetSegmentIndex(segmentId, index)
 
     @staticmethod
     def segmentIds(segmentation):

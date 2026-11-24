@@ -471,6 +471,12 @@ class NormalizationDatabaseMixin:
             warnings = self._databaseUnitWarnings(info, header)
             if warnings:
                 lines.append(WARNING_STYLE.format(" ".join(warnings)))
+            sequence = self.sequence() if normaldb.isDynamic(header) and hasattr(self, "sequence") else None
+            if sequence is not None:        # the Data step's smoothing: not locked, only warned about
+                from NeuroWorkflowLib.dynamicdb import seriesSmoothingOf
+                smoothingWarning = normaldb.seriesSmoothingWarning(header, seriesSmoothingOf(sequence))
+                if smoothingWarning:
+                    lines.append(WARNING_STYLE.format(smoothingWarning))
             if not self._meanComputed(folder, header):
                 lines.append("Its mean / SD maps are not computed yet.")
             lines.extend(self._normalizationWarnings(header))

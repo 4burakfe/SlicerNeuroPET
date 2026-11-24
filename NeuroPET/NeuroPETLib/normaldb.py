@@ -132,7 +132,9 @@ IMAGE_EXTENSIONS = (".nii.gz", ".nii", ".nrrd", ".nhdr", ".mha", ".mhd")
 SUBJECT_COLUMNS = ("id", "age", "sex", "scanDate", "added", "suvFile", "suvrFile", "referenceMean", "reference",
                    "normalization", "source", "nativeFile", "anatomy", "anatomyFile", "anatomyNativeFile",
                    # dynamic: {map name: file} (JSON), the regions' TAC fit values (JSON), their TACs (CSV)
-                   "mapFiles", "fitsFile", "tacsFile")
+                   "mapFiles", "fitsFile", "tacsFile",
+                   # dynamic: the Data step's smoothing of the frames (FWHM mm, 0: none), the series file it came from
+                   "seriesSmoothingMm", "sourceFile")
 # How the subjects' maps are stored (shown in the Pipeline of a database; written into database.json)
 STORAGE = {"grid": "MNI ICBM 152 2009c, 1 mm (the reference mask's grid)", "interpolation": "linear",
            "smoothing": "none (the database's FWHM is applied when the mean / SD are computed, and to the patient)",
@@ -592,6 +594,9 @@ def newHeader(name, mode=STATIC, kind=USER_DEFINED, **fields):
         "normalizationTemplate": {},
         # dynamic: the kinetic model of the subjects' maps (defaultKinetics); static: None
         "kinetics": defaultKinetics() if mode == DYNAMIC else None,
+        # dynamic: the Data step's Gaussian smoothing of the frames (FWHM mm, 0: none; None: not set yet, the first
+        # subject sets it); not locked: a subject made otherwise is only warned about
+        "seriesSmoothingFwhmMm": None,
     }
     for key, value in fields.items():
         if key not in header:
@@ -642,6 +647,8 @@ def validateHeader(header):
             errors.append(f"The acquisition {title} cannot be negative")
     if float(header.get("smoothingFwhmMm") or 0) < 0:
         errors.append("The smoothing cannot be negative")
+    if header.get("seriesSmoothingFwhmMm") not in (None, "") and headerNumber(header["seriesSmoothingFwhmMm"], -1.0) < 0:
+        errors.append("The series smoothing cannot be negative")
     if float(header.get("referenceErosionMm") or 0) < 0:
         errors.append("The reference erosion cannot be negative")
     if float(header.get("regionGrowMm") or 0) < 0:
@@ -934,6 +941,9 @@ def addSubject(folder, subject, normalization=None, replace=False):
         # only the settings' keys (a batch plan carries others, e.g. the template pass)
         header["normalization"] = dict(emptyNormalization(), **{k: v for k, v in normalization.items()
                                                                  if k in NORM_KEYS})
+    if isDynamic(header) and seriesSmoothing(header) is None and str(row.get("seriesSmoothingMm") or "").strip():
+        # the first subject with a known Data step smoothing sets the database's
+        header["seriesSmoothingFwhmMm"] = max(0.0, headerNumber(row["seriesSmoothingMm"], 0.0))
     writeHeader(folder, header)
     return header
 
@@ -1122,7 +1132,8 @@ def createDatabase(root, header):
 # Settings that can be edited after a database is made; those of a predefined database's maps stay as they are
 EDITABLE_KEYS = ("name", "modality", "nuclide", "tracer", "acquisition", "referenceRegion",
                  "referenceStructure", "referenceErosionMm", "smoothingFwhmMm", "mapType", "regionAtlas", "regionGrowMm", "growInto",
-                 "normalization", "ageStratified", "ageGroups", "scanner", "description", "kinetics")
+                 "normalization", "ageStratified", "ageGroups", "scanner", "description", "kinetics",
+                 "seriesSmoothingFwhmMm")
 PREDEFINED_FIXED_KEYS = ("referenceRegion", "referenceStructure", "referenceErosionMm", "smoothingFwhmMm", "mapType", "ageStratified",
                          "ageGroups")
 STATISTICS_KEYS = ("referenceRegion", "referenceStructure", "referenceErosionMm", "smoothingFwhmMm", "ageStratified", "ageGroups",
@@ -1270,6 +1281,39 @@ def isRatioMap(header):
     """Whether the patient's image is divided by its reference region before the comparison: the ratio maps (SUVR /
     Ratio) of a static database (a dynamic database's maps are relative to the reference already)."""
     return (header or {}).get("mapType") in (MAP_SUVR, MAP_RATIO) and not isDynamic(header)
+
+
+def seriesSmoothing(header):
+    """The Data step's smoothing of a dynamic database's series (Gaussian FWHM mm of the frames before the motion
+    correction; 0: none), None when it is not set yet."""
+    value = (header or {}).get("seriesSmoothingFwhmMm")
+    if value in (None, ""):
+        return None
+    number = headerNumber(value, -1.0)
+    return number if number >= 0 else None
+
+
+def seriesSmoothingText(value):
+    """'5 mm FWHM', 'none' or 'not set' of a series smoothing (seriesSmoothing)."""
+    if value is None:
+        return "not set"
+    return f"{float(value):g} mm FWHM" if float(value) > 0 else "none"
+
+
+def sameSeriesSmoothing(a, b):
+    """Whether two series smoothings (FWHM mm, None / 0: none) are the same."""
+    return abs(float(a or 0.0) - float(b or 0.0)) < 1e-3
+
+
+def seriesSmoothingWarning(header, fwhm):
+    """A warning (str, '' when none) when a series smoothed with fwhm (mm; None / 0: not smoothed) is compared with
+    or added to a dynamic database whose subjects' series were smoothed otherwise (the database's setting not set:
+    nothing to say)."""
+    expected = seriesSmoothing(header)
+    if expected is None or sameSeriesSmoothing(expected, fwhm):
+        return ""
+    return (f"The series was smoothed {seriesSmoothingText(float(fwhm or 0.0))} on the Data step, the database's "
+            f"subjects {seriesSmoothingText(expected)}: the maps are not made alike.")
 
 
 def mapFileName(subjectId, mapName, extension=".nii.gz"):
@@ -1532,6 +1576,8 @@ def pipelineRows(folder, header):
         counts = anatomyCounts(folder)
         rows.append(("CT / MR", ", ".join(f"{c}: {counts[c]}" for c in ANATOMY_CONTRASTS if c in counts)
                      + " of " + str(count) + " subjects" if counts else "none (optional)"))
+    if isDynamic(header):
+        rows.append(("Series smoothing (Data step)", seriesSmoothingText(seriesSmoothing(header))))
     target = normalizationTarget(header)
     rows.append(("Normalization target (pass 0)", templateTitle(target)))
     frozen = header.get("normalizationTemplate") or {}

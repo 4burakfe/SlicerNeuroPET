@@ -74,6 +74,7 @@ from StaticNeuroPETLib.review_cut import ReviewCutMixin
 from StaticNeuroPETLib.review_peel import ReviewPeelMixin
 from StaticNeuroPETLib.review_layout import ReviewLayoutMixin, registerReviewLayouts
 from StaticNeuroPETLib.review_mouse import ReviewMouseMixin
+from StaticNeuroPETLib.report import ReportMixin
 from StaticNeuroPETLib.constants import BATCH_PET_FALLBACK, BATCH_SKIP  # noqa: F401 (NeuroPETDatabaseManager)
 
 
@@ -137,6 +138,7 @@ class StaticNeuroPETWidget(ToolbarMixin,
                             ReviewPeelMixin,
                             ReviewLayoutMixin,
                             ReviewMouseMixin,
+                            ReportMixin,
                             NeuroWorkflowWidget):
     """The Dynamic Neuro workflow on a static PET / SPECT: own Data, CT/MR registration, Regions (normal
     database settings) and Review pages; the Normalization page of the Dynamic Neuro module with the normal database

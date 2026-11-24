@@ -15,6 +15,7 @@ set(NEURO_LIB_SCRIPTS
   NeuroPETLib/dbdownload.py
   NeuroPETLib/dynamicneuro.py
   NeuroPETLib/neuro.py
+  NeuroPETLib/neuroreport.py
   NeuroPETLib/neuroreview.py
   NeuroPETLib/normaldb.py
   NeuroPETLib/peel.py
@@ -43,6 +44,7 @@ slicerMacroBuildScriptedModule(
     Resources/Icons/${NEURO_MODULE_NAME}.png
     Resources/Images/banner.jpg
     Resources/Images/logo.png
+    Resources/Images/report_banner.jpg
     # the atlas files that come with the extension (their licenses: Resources/Atlas/LICENSE.txt): the template space
     # (Space/<id>) and the region segmentations (Segmentation/<id>), see NeuroPETLib/neuro.py
     Resources/Atlas/LICENSE.txt
@@ -111,6 +113,7 @@ set(STATIC_NEURO_LIB_SCRIPTS
   StaticNeuroPETLib/review_peel.py
   StaticNeuroPETLib/review_layout.py
   StaticNeuroPETLib/review_mouse.py
+  StaticNeuroPETLib/report.py
   )
 
 slicerMacroBuildScriptedModule(

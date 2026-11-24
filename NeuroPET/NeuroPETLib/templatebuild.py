@@ -177,3 +177,31 @@ def writeIterationsLog(path, rows):
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+# --- dynamic databases: the template of the subjects' normalized summed images ---------------------------------
+SUMMED_SCALE = 100.0       # each summed image scaled to this mean in the brain before the mean
+
+
+def scaledMean(arrays, mask=None, scale=None):
+    """The mean of summed images (numpy arrays on one grid), each scaled first to a mean of scale (default
+    SUMMED_SCALE) in mask (a boolean array; default: the voxels above 20 % of the image's 99.5th percentile): the
+    injected activity of a subject does not weigh in. Returns (mean array, number of images used)."""
+    total, count = None, 0
+    for array in arrays:
+        values = np.nan_to_num(np.asarray(array, dtype=np.float64))
+        if mask is not None and np.shape(mask) == values.shape:
+            inside = np.asarray(mask, dtype=bool)
+        else:
+            positive = values[values > 0]
+            top = float(np.percentile(positive, 99.5)) if positive.size else 0.0
+            inside = values > 0.2 * top
+        mean = float(values[inside].mean()) if np.any(inside) else 0.0
+        if mean <= 0:
+            continue
+        scaled = values * (float(scale or SUMMED_SCALE) / mean)
+        total = scaled if total is None else total + scaled
+        count += 1
+    if total is None:
+        raise ValueError("No summed image with activity in the brain.")
+    return (total / count).astype(np.float32), count

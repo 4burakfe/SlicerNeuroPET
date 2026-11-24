@@ -28,6 +28,7 @@ import slicer
 
 from NeuroWorkflowLib.base import NEURO_PREFIX, _button
 from NeuroWorkflowLib.database import NORMALIZATION_ATTRIBUTE, WARNING_STYLE
+from NeuroWorkflowLib.dynamicdb import seriesSmoothingOf
 from NeuroPETLib import credits, dynamicneuro as dn, neuro, neuroreview as nr, normaldb, staticneuro as sn
 
 KM_PREFIX = "DynamicPET.Modeling."              # the PET4D Modeling module's attributes of its maps and tables
@@ -238,6 +239,10 @@ class ComparePageMixin:
         if age is None:
             notes.append("The age is not known" + (" (the database has age groups)." if header.get("ageStratified")
                                                    else "."))
+        seriesSmoothing = seriesSmoothingOf(sequence)
+        smoothingWarning = normaldb.seriesSmoothingWarning(header, seriesSmoothing)
+        if smoothingWarning:
+            notes.append(smoothingWarning)
         replace = normaldb.hasSubject(folder, subjectId)
         if replace:
             notes.append(f"Subject '{subjectId}' is already in the database: it will be replaced.")
@@ -258,7 +263,7 @@ class ComparePageMixin:
                 referenceName=settings.get("reference") or "", settings=settings,
                 writeRegionsCsv=(lambda path: widget.logic.exportCsv(path, analysis, results, model))
                 if analysis is not None else None,
-                source=sequence.GetName(), scanDate=scanDate, replace=replace)
+                source=sequence.GetName(), scanDate=scanDate, replace=replace, seriesSmoothing=seriesSmoothing)
         except Exception as error:
             logging.exception("Dynamic Neuro: could not add the subject")
             slicer.util.errorDisplay(f"Could not add the patient to the database:\n{error}",
@@ -706,6 +711,9 @@ class ComparePageMixin:
                 lines.append(WARNING_STYLE.format(f"Not the kinetic settings of '{header.get('name')}': "
                                                   + "; ".join(differences) + "."))
         if header is not None and normaldb.isDynamic(header):
+            smoothingWarning = normaldb.seriesSmoothingWarning(header, seriesSmoothingOf(sequence))
+            if smoothingWarning:
+                lines.append(WARNING_STYLE.format(smoothingWarning))
             computed = normaldb.statisticsMaps(header)
             name = self._selectedMapName()
             if not computed:

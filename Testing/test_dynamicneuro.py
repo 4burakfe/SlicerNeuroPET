@@ -140,3 +140,20 @@ def test_fit_values(tmp_path):
     assert normaldb.fitValues(document, "BPnd") == {"Putamen L": 2.5}
     assert normaldb.fitValues(document, "R1") == {}
     assert normaldb.readFits(folder, {"fitsFile": "subjects/s1/none.json"}) is None
+
+
+def test_series_smoothing_of_a_dynamic_database(tmp_path):
+    header = normaldb.newHeader("D", normaldb.DYNAMIC)
+    assert normaldb.seriesSmoothing(header) is None
+    assert normaldb.seriesSmoothingText(None) == "not set"
+    assert normaldb.seriesSmoothingWarning(header, 5.0) == ""         # not set: nothing to say
+    header["seriesSmoothingFwhmMm"] = 4.0
+    assert normaldb.seriesSmoothing(header) == 4.0
+    assert normaldb.seriesSmoothingWarning(header, 4.0) == ""
+    assert "4 mm" in normaldb.seriesSmoothingWarning(header, 0.0)
+    assert normaldb.seriesSmoothingText(0.0) == "none"
+    header["seriesSmoothingFwhmMm"] = 0.0
+    assert normaldb.seriesSmoothingWarning(header, None) == ""        # none = not smoothed
+    assert normaldb.seriesSmoothingWarning(header, 3.0) != ""
+    header["seriesSmoothingFwhmMm"] = -1.0
+    assert any("smoothing" in e.lower() for e in normaldb.validateHeader(header))

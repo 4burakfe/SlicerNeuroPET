@@ -83,6 +83,13 @@ class ToolbarMixin:
         tableButton.setFocusPolicy(qt.Qt.NoFocus)
         tableButton.connect("clicked()", self._toggleTable)
         self._reviewToolActions.append(toolbar.addWidget(tableButton))
+        reportButton = qt.QToolButton()
+        reportButton.setText("PDF")
+        reportButton.toolTip = "Save the PDF report of the review (settings: the PDF report box of the review step)"
+        reportButton.setToolButtonStyle(qt.Qt.ToolButtonTextOnly)
+        reportButton.setFocusPolicy(qt.Qt.NoFocus)
+        reportButton.connect("clicked()", lambda: self.onSaveReport())
+        self._reviewToolActions.append(toolbar.addWidget(reportButton))
         for action in self._reviewToolActions:
             action.setVisible(False)
 

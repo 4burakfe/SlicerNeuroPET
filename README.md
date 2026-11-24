@@ -494,6 +494,15 @@ step; a step opens at its top. Without a CT / MR, Next goes from the data straig
      database's reference structures, the pons and the brainstem together): the region color, SUVmean, the value of the database's map type (SUVR / ratio), the normals'
      mean, SD and n, and the score; as wide as its content. Click a column header to sort (by name or by value);
      click a region to show it alone on the slices for 5 s, the slices moved through it.
+   - **PDF report** (box of the review step, or the toolbar's **PDF** button): an A4 PDF with (1) the patient and the
+     scan (name, ID, birth date, age / sex, weight, scan date, modality, radionuclide, radiopharmaceutical, injected
+     activity, injection to scan time, scan duration, scanner; from the DICOM file of the image) and the comparison
+     (normal database, the normals compared and n, reference region, score, smoothing, regions, normalization);
+     (2) the slices as they are on screen (the PET row and the score row, axial / coronal / sagittal) with color
+     bars; (3) the 3D-SSP in 16 views on a white background (2 x 4 of the scores as set in the 3D-SSP box, 2 x 4 of
+     those below the threshold; 12 without medial views), drawn off screen whatever the layout; (4) the region table
+     sorted by name (scores at or beyond the threshold in bold, blue below and red above the normals); the comment
+     when one is written. The Mergen banner at the top, the "research use only" note in red on the first page.
    - **3D-SSP** (Minoshima et al. 1995): the surface of all the regions together, and for the medial views each
      hemisphere's: only with regions with sides ("... L" / "... R"), each hemisphere's surface made from its own
      regions (not cut at the midline; a bilateral reference split at the midline); with bilateral regions no medial views and

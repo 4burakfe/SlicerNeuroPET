@@ -83,6 +83,7 @@ class ReviewPageMixin:
         layout = qt.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         self._buildReviewBoxes(layout)
+        self._buildReportBox(layout)
 
         addBox = qt.QGroupBox("Add this patient to a normal database")
         addBox.toolTip = ("For building a user defined database from normal subjects: the normalized image is "

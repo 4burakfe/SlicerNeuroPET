@@ -30,6 +30,7 @@ METHODS = ((METHOD_PET, "PET/SPECT to MR template (T1)"),
 # application settings keys: kept from the PET4D extension (the neuro modules came from it), so the folders stay picked
 SETTINGS_IMPORT_FOLDER = "DICOMGatedDynamicPET/StaticNeuro/ImportFolder"
 SETTINGS_DISPLAY = "DICOMGatedDynamicPET/StaticNeuro/DisplaySettings"     # JSON of the saved review display settings
+SETTINGS_REPORT = "DICOMGatedDynamicPET/StaticNeuro/Report"     # JSON: the PDF report's folder, checks
 AGE_ATTRIBUTE, SEX_ATTRIBUTE = NEURO_PREFIX + "PatientAge", NEURO_PREFIX + "PatientSex"
 NAME_ATTRIBUTE, ID_ATTRIBUTE = NEURO_PREFIX + "PatientName", NEURO_PREFIX + "PatientID"
 SOURCE_ATTRIBUTE = NEURO_PREFIX + "Source"      # a CT / MR normalized with the image (the volume it was made from)
@@ -46,6 +47,7 @@ TEMPLATE_KEY_ATTRIBUTE = NEURO_PREFIX + "TemplateKey"       # the template key o
 BATCH_PET_FALLBACK, BATCH_SKIP = "pet", "skip"
 REGISTERED_SUFFIX = " registered"
 ICON_PATH = os.path.join(_MODULE_DIR, "Resources", "Icons", "StaticNeuroPET.png")
+REPORT_BANNER_PATH = os.path.join(_MODULE_DIR, "Resources", "Images", "report_banner.jpg")    # top of the PDF report
 REVIEW_PET_COLORMAP = "Inverted grey"                  # the top row (the normalized PET / SPECT)
 REVIEW_SSP_PATIENT_COLORMAP = "PET-DICOM"       # the 3D-SSP of the patient's projected values
 REVIEW_PEEL_PET_COLORMAP = "Hel"          # the PET of the unfolded brain maps (and its fusion)
