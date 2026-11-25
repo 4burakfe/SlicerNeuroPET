@@ -602,6 +602,8 @@ class ReviewPageMixin:
         self.fusionSourceCombo.setCurrentIndex(max(0, self.fusionSourceCombo.findData(current)))
         self.fusionSourceCombo.blockSignals(False)
         self.fusionCheck.enabled = bool(wanted)
+        if hasattr(self, "_syncSegmentsAction"):
+            self._syncSegmentsAction()      # the toolbar's Fusion button greyed out without an anatomical image
 
     def _fusionVolume(self):
         if not self.fusionCheck.checked or not self.fusionCheck.enabled:

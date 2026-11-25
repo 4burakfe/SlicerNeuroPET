@@ -436,89 +436,179 @@ class ReportMixin:
         return uid
 
     @staticmethod
-    def _indexReport(paths, uids):
+    def _dicomDatabase():
         database = slicer.dicomDatabase
         if database is None or not database.isOpen:
-            raise RuntimeError("Open a Slicer DICOM database to import the saved files.")
+            raise RuntimeError("Open a Slicer DICOM database first (DICOM module).")
+        return database
+
+    def _importDicom(self, paths, uids):
+        """The files copied into the Slicer DICOM database (its own folder: the files given may be temporary)."""
+        database = self._dicomDatabase()
         indexer = ctk.ctkDICOMIndexer()
         for path in paths:
-            indexer.addFile(database, path, True)    # keep a managed copy when the exported file moves
+            indexer.addFile(database, path, True)    # True: a copy kept in the database's folder
         indexer.waitForImportFinished()
+        folders = {os.path.normcase(os.path.abspath(os.path.dirname(path))) for path in paths}
         for uid in uids:
             indexed = database.fileForInstance(uid)
-            if not indexed or not os.path.isfile(indexed):
-                raise IOError("The saved report could not be found in the DICOM database.")
+            if (not indexed or not os.path.isfile(indexed)
+                    or os.path.normcase(os.path.abspath(os.path.dirname(indexed))) in folders):
+                raise IOError("The DICOM database did not keep a copy of the saved images.")
 
-    @staticmethod
-    def _dicomPagePaths(path, pages):
-        """One file per page: the chosen name itself for one page, else name_page1.dcm, name_page2.dcm, ..."""
-        if pages == 1:
-            return [path]
-        stem, ext = os.path.splitext(path)
-        return [f"{stem}_page{number}{ext}" for number in range(1, pages + 1)]
+    def _dicomTarget(self):
+        """(volume, patient, study, scan, comparison, dicom, studyUID, sourceUIDs) of the review's DICOM outputs."""
+        volume = self.reviewVolume()
+        patient, study, scan, comparison, dicom = self._reportContent()
+        sourceUIDs = (volume.GetAttribute("DICOM.instanceUIDs") or "").split()
+        studyUID = self._reportStudyUID(volume, dicom, sourceUIDs, patient)
+        return volume, patient, study, scan, comparison, dicom, studyUID, sourceUIDs
 
     def onSaveReport(self, asDicom=False):
-        kind = "DICOM" if asDicom else "PDF"
-        title = kind + " report"
+        if asDicom:
+            self.onSaveDicomReport()
+            return
+        title = "PDF report"
         if self.reviewResult is None:
             slicer.util.warningDisplay("Compare the patient first (Review step).", windowTitle=title)
             return
-        volume = self.reviewVolume()
         patient, study, scan, comparison, dicom = self._reportContent()
         folder = self._reportSettings().get("folder") or os.path.expanduser("~")
         name = rp.reportFileName(patient.get("name"), study.get("date"), self.REPORT_FILE_SUFFIX)
-        ext = ".dcm" if asDicom else ".pdf"
-        name = os.path.splitext(name)[0] + ext
+        name = os.path.splitext(name)[0] + ".pdf"
         path = qt.QFileDialog.getSaveFileName(slicer.util.mainWindow(), "Save the " + title,
-                                              os.path.join(folder, name), f"{kind} (*{ext})")
+                                              os.path.join(folder, name), "PDF (*.pdf)")
         if not path:
             return
         path = str(path)
-        if not path.lower().endswith(ext):
-            path += ext
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
         folder = os.path.dirname(path)
         self._saveReportSettings(folder)
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
             # Stage the final file on the destination filesystem so a failed export preserves an existing report.
             with tempfile.TemporaryDirectory(dir=folder) as staging, tempfile.TemporaryDirectory() as work:
-                if asDicom:     # the pages as images (Secondary Capture), viewable in any DICOM viewer
-                    sourceUIDs = (volume.GetAttribute("DICOM.instanceUIDs") or "").split()
-                    studyUID = self._reportStudyUID(volume, dicom, sourceUIDs, patient)
-                    pageFolder = os.path.join(work, "pages")
-                    os.makedirs(pageFolder)
-                    images = self._renderReport(None, work, patient, study, scan, comparison, imageFolder=pageFolder)
-                    pages = len(images)
-                    paths = self._dicomPagePaths(path, pages)
-                    staged = [os.path.join(staging, f"page{number}.dcm") for number in range(1, pages + 1)]
-                    uids = rp.writeDicomImages(staged, images, self.REPORT_TITLE, patient, dicom, studyUID,
-                                               sourceUIDs)
-                    for source, target in zip(staged, paths):
-                        os.replace(source, target)
-                else:
-                    pdfPath = os.path.join(staging, "report.pdf")
-                    pages = self._renderReport(pdfPath, work, patient, study, scan, comparison)
-                    os.replace(pdfPath, path)
+                pdfPath = os.path.join(staging, "report.pdf")
+                pages = self._renderReport(pdfPath, work, patient, study, scan, comparison)
+                os.replace(pdfPath, path)
         except Exception as error:
-            logging.exception("Static Neuro: could not write the %s report", kind)
+            logging.exception("Static Neuro: could not write the PDF report")
             slicer.util.errorDisplay(f"Could not write the {title}:\n{error}", windowTitle=title)
             return
         finally:
             qt.QApplication.restoreOverrideCursor()
         message = f"Saved: {path} ({pages} page{'s' if pages != 1 else ''})"
-        if asDicom:
-            if pages > 1:
-                message = (f"Saved: {os.path.basename(paths[0])} ... {os.path.basename(paths[-1])} in {folder} "
-                           f"({pages} pages)")
-            try:
-                self._indexReport(paths, uids)
-            except Exception as error:
-                logging.exception("Static Neuro: could not index the saved DICOM report")
-                self.reportLabel.text = message + " — DICOM database import failed."
-                slicer.util.errorDisplay(f"{self.reportLabel.text}\n{error}", windowTitle=title)
-                return
-            message += " — added to the DICOM database."
         self.reportLabel.text = message
         slicer.util.showStatusMessage(message, 5000)
-        if not asDicom and self.reportOpenCheck.checked:
+        if self.reportOpenCheck.checked:
             qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(path))
+
+    def onSaveDicomReport(self):
+        """The report's pages as images (Secondary Capture), straight into the Slicer DICOM database (no file to
+        pick): a new series in the PET's study."""
+        title = "DICOM report"
+        if self.reviewResult is None:
+            slicer.util.warningDisplay("Compare the patient first (Review step).", windowTitle=title)
+            return
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        try:
+            self._dicomDatabase()
+            _, patient, study, scan, comparison, dicom, studyUID, sourceUIDs = self._dicomTarget()
+            with tempfile.TemporaryDirectory() as work:
+                pageFolder = os.path.join(work, "pages")
+                os.makedirs(pageFolder)
+                images = self._renderReport(None, work, patient, study, scan, comparison, imageFolder=pageFolder)
+                paths = [os.path.join(work, f"page{number}.dcm") for number in range(1, len(images) + 1)]
+                uids = rp.writeDicomImages(paths, images, self.REPORT_TITLE, patient, dicom, studyUID, sourceUIDs)
+                self._importDicom(paths, uids)
+        except Exception as error:
+            logging.exception("Static Neuro: could not save the DICOM report")
+            slicer.util.errorDisplay(f"Could not save the {title}:\n{error}", windowTitle=title)
+            return
+        finally:
+            qt.QApplication.restoreOverrideCursor()
+        pages = len(uids)
+        message = (f"DICOM report ({pages} page{'s' if pages != 1 else ''}) added to the DICOM database "
+                   f"(series {rp.REPORT_SERIES[1]}, \"{rp.REPORT_SERIES[0]}\").")
+        self.reportLabel.text = message
+        slicer.util.showStatusMessage(message, 5000)
+
+    # --- screenshots ---------------------------------------------------------------------------------------------
+    def _screenImages(self):
+        """The views on screen as QImages: the main window's views, and the Monitor 2 window when shown."""
+        layoutManager = slicer.app.layoutManager()
+        images = []
+        if layoutManager is not None:
+            images.append(ctk.ctkWidgetsUtils.grabWidget(layoutManager.viewport()))
+        window = self._monitor2Window() if hasattr(self, "_monitor2Window") else None
+        if window is not None and window.visible:
+            content = window.widget() if window.inherits("QDockWidget") and window.widget() is not None else window
+            images.append(ctk.ctkWidgetsUtils.grabWidget(content))
+        return [image for image in images if image is not None and not image.isNull()]
+
+    @staticmethod
+    def _sideBySide(images):
+        """The images in one, left to right on black (the main window, then Monitor 2)."""
+        if len(images) == 1:
+            return images[0]
+        width = sum(image.width() for image in images)
+        height = max(image.height() for image in images)
+        joined = qt.QImage(width, height, qt.QImage.Format_RGB32)
+        joined.fill(qt.QColor(0, 0, 0))
+        painter = qt.QPainter(joined)
+        x = 0
+        for image in images:
+            painter.drawImage(x, 0, image)
+            x += image.width()
+        painter.end()
+        return joined
+
+    def onScreenshotClipboard(self):
+        images = self._screenImages()
+        if not images:
+            slicer.util.warningDisplay("No views to capture.", windowTitle="Screenshot")
+            return
+        qt.QApplication.clipboard().setImage(self._sideBySide(images))
+        slicer.util.showStatusMessage("Screenshot copied to the clipboard.", 3000)
+
+    def onScreenshotDicom(self):
+        """The views on screen as Secondary Capture images in the PET's study (one image per window), straight into
+        the DICOM database; the screenshots of one PET go into one series."""
+        title = "DICOM screenshot"
+        images = self._screenImages()
+        if not images:
+            slicer.util.warningDisplay("No views to capture.", windowTitle=title)
+            return
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        try:
+            self._dicomDatabase()
+            volume, patient, _, _, _, dicom, studyUID, sourceUIDs = self._dicomTarget()
+            seriesKey, countKey = NEURO_PREFIX + "ScreenshotSeriesUID", NEURO_PREFIX + "ScreenshotCount"
+            seriesUID = volume.GetAttribute(seriesKey)
+            if not seriesUID:
+                from pydicom.uid import generate_uid
+                seriesUID = generate_uid()
+            first = int(volume.GetAttribute(countKey) or 0) + 1
+            with tempfile.TemporaryDirectory() as work:
+                pngs, paths = [], []
+                for index, image in enumerate(images):
+                    png = os.path.join(work, f"shot{index + 1}.png")
+                    if not image.convertToFormat(qt.QImage.Format_RGB888).save(png, "PNG"):
+                        raise IOError("Could not write the screenshot image.")
+                    pngs.append(png)
+                    paths.append(os.path.join(work, f"shot{index + 1}.dcm"))
+                uids = rp.writeDicomImages(paths, pngs, "Screenshot", patient, dicom, studyUID, sourceUIDs,
+                                           series=rp.SCREENSHOT_SERIES, seriesUID=seriesUID, firstNumber=first,
+                                           pixelSpacingMm=None)
+                self._importDicom(paths, uids)
+            volume.SetAttribute(seriesKey, seriesUID)
+            volume.SetAttribute(countKey, str(first + len(uids) - 1))
+        except Exception as error:
+            logging.exception("Static Neuro: could not save the DICOM screenshot")
+            slicer.util.errorDisplay(f"Could not save the {title}:\n{error}", windowTitle=title)
+            return
+        finally:
+            qt.QApplication.restoreOverrideCursor()
+        slicer.util.showStatusMessage(f"Screenshot added to the DICOM database (series {rp.SCREENSHOT_SERIES[1]}, "
+                                      f"\"{rp.SCREENSHOT_SERIES[0]}\").", 5000)

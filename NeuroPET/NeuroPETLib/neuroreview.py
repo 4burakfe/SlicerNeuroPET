@@ -669,10 +669,10 @@ ORIENTATIONS = (("Axial", "#F34A33"), ("Coronal", "#6EB04B"), ("Sagittal", "#EDD
 PET_ROW, SCORE_ROW = "PET", "Score"
 VIEW_PREFIX = "NeuroRev"
 VIEW_GROUP = 93
-# 2 x 4: each medial view beside the lateral one seen from the same side (top row from the left: the left lateral,
-# the right hemisphere's medial face; bottom row from the right: the right lateral, the left hemisphere's medial face)
-SSP_VIEWS = (("Top", "Superior"), ("Ant", "Anterior"), ("Left", "Left"), ("RightMedial", "Right medial"),
-             ("Bottom", "Inferior"), ("Post", "Posterior"), ("Right", "Right"), ("LeftMedial", "Left medial"))
+# 2 x 4: each medial view beside the lateral one of the same hemisphere (top row: the left lateral, then the left
+# hemisphere's medial face; bottom row: the right lateral, then the right hemisphere's medial face; Burak 2026-11-25)
+SSP_VIEWS = (("Top", "Superior"), ("Ant", "Anterior"), ("Left", "Left"), ("LeftMedial", "Left medial"),
+             ("Bottom", "Inferior"), ("Post", "Posterior"), ("Right", "Right"), ("RightMedial", "Right medial"))
 SSP_COLUMNS = 4
 MEDIAL_KEYS = ("LeftMedial", "RightMedial")     # only with regions with sides (R / L): 2 x 3 views without them
 # the sets of 3D-SSP views: the main one (as set in the 3D-SSP box) and the low scores' (below the threshold)

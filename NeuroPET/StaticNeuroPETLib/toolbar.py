@@ -77,11 +77,25 @@ class ToolbarMixin:
 
         row = reviewToolbar if reviewToolbar is not None else toolbar
         self._reviewToolActions = []
+        def label(text):
+            caption = qt.QLabel(text)
+            caption.setStyleSheet("QLabel { font-weight: bold; padding: 0 2px 0 6px; }")
+            row.addWidget(caption)
+
         if reviewToolbar is not None:
+            label("Report:")
             pdf = action(row, "ReportPDF", "PDF", "Save the review report as a PDF")
             pdf.connect("triggered()", self.onSaveReport)
             dicom = action(row, "ReportDICOM", "DICOM", "Save the report as DICOM and add it to the DICOM database")
-            dicom.connect("triggered()", lambda: self.onSaveReport(asDicom=True))
+            dicom.connect("triggered()", self.onSaveDicomReport)
+            dicom.toolTip = "Save the report pages as images straight into the DICOM database (the PET's study)"
+            row.addSeparator()
+            label("Screenshot:")
+            copy = action(row, "ScreenshotClipboard", "Clipboard", "Copy a screenshot of the views to the clipboard")
+            copy.connect("triggered()", self.onScreenshotClipboard)
+            shot = action(row, "ScreenshotDICOM", "DICOM",
+                          "Save a screenshot of the views into the DICOM database (the PET's study)")
+            shot.connect("triggered()", self.onScreenshotDicom)
         self._reviewToolActions.append(row.addSeparator())
         for icon, label, tip, fill in (
                 ("SingleLayout", "Single Layouts", "Review layouts on one monitor",
@@ -97,10 +111,66 @@ class ToolbarMixin:
             item.setMenu(menu)
             row.widgetForAction(item).setPopupMode(qt.QToolButton.InstantPopup)
             self._reviewToolActions.append(item)
+        restore = action(row, "Restore3D", "Restore 3D", "Restore the 3D-SSP views (rotation, zoom, pan)")
+        restore.connect("triggered()", lambda: self._setupSspViews(fit=True))
+        self._reviewToolActions.append(restore)
+        fusion = action(row, "Fusion", "Fusion", "Show the PET and the scores over the anatomical image (on / off)")
+        fusion.setCheckable(True)
+        fusion.connect("triggered(bool)", self._setFusion)
+        self._fusionAction = fusion
+        self._reviewToolActions.append(fusion)
+        segments = action(row, "Segments", "Segments", "Show or hide the region outlines on the slices and the 3D-SSP")
+        segments.setCheckable(True)
+        segments.connect("triggered(bool)", self._showAllOutlines)
+        self._segmentsAction = segments
+        self._connectSegmentsAction()
+        self._reviewToolActions.append(segments)
         table = action(row, "Table", "Table", "Show or hide the region table on the right")
         table.connect("triggered()", self._toggleTable)
         self._reviewToolActions.append(table)
         self._updateReviewTools()
+
+    def _outlineChecks(self):
+        return [check for check in (getattr(self, "outlineCheck", None), getattr(self, "sspOutlineCheck", None))
+                if check is not None]
+
+    def _showAllOutlines(self, on):
+        """The Segments button: the region outlines on the slices and on the 3D-SSP together."""
+        for check in self._outlineChecks():
+            check.checked = bool(on)
+        self._syncSegmentsAction()
+
+    def _connectSegmentsAction(self):
+        """The Segments and Fusion buttons follow the panel's checks (once they exist: the toolbar is built before
+        the review page)."""
+        if getattr(self, "_segmentsConnected", False) or len(self._outlineChecks()) < 2:
+            return
+        for check in self._outlineChecks() + [getattr(self, "fusionCheck", None)]:
+            if check is not None:
+                check.connect("toggled(bool)", lambda on: self._syncSegmentsAction())
+        self._segmentsConnected = True
+        self._syncSegmentsAction()
+
+    def _syncSegmentsAction(self):
+        """The Segments button pressed while either outline setting (slices, 3D-SSP) is on; the Fusion button as the
+        fusion check (off and greyed out without an anatomical image)."""
+        action = getattr(self, "_segmentsAction", None)
+        if action is not None:
+            on = any(check.checked for check in self._outlineChecks())
+            if action.checked != on:
+                action.setChecked(on)
+        action, check = getattr(self, "_fusionAction", None), getattr(self, "fusionCheck", None)
+        if action is not None and check is not None:
+            action.enabled = bool(check.enabled)
+            on = bool(check.checked and check.enabled)
+            if action.checked != on:
+                action.setChecked(on)
+
+    def _setFusion(self, on):
+        check = getattr(self, "fusionCheck", None)
+        if check is not None and check.enabled:
+            check.checked = bool(on)
+        self._syncSegmentsAction()
 
     @staticmethod
     def _toggleModulePanel():

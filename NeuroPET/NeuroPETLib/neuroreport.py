@@ -473,7 +473,11 @@ def _qt():
     return qt
 
 
-def _reportDataset(path, sopClass, patient, dicom, studyUID, sourceUIDs, seriesUID, number):
+REPORT_SERIES = ("Mergen Neuro PET report", 900)            # (series description, series number)
+SCREENSHOT_SERIES = ("Mergen Neuro PET screenshots", 901)
+
+
+def _reportDataset(path, sopClass, patient, dicom, studyUID, sourceUIDs, seriesUID, number, series=REPORT_SERIES):
     """A DICOM dataset with the report's patient, study and series (same study as the source PET)."""
     from pydicom.dataset import Dataset, FileDataset, FileMetaDataset
     from pydicom.uid import ExplicitVRLittleEndian, generate_uid
@@ -499,8 +503,7 @@ def _reportDataset(path, sopClass, patient, dicom, studyUID, sourceUIDs, seriesU
     doc.PatientSex = {"Female": "F", "Male": "M", "Other": "O"}.get(patient.get("sex"), dicom.get("PatientSex", ""))
     doc.StudyInstanceUID = studyUID
     doc.SeriesInstanceUID = seriesUID
-    doc.SeriesDescription = "Mergen Neuro PET report"
-    doc.SeriesNumber = 900
+    doc.SeriesDescription, doc.SeriesNumber = series
     doc.InstanceNumber = number
     doc.Manufacturer = SOFTWARE
     created = datetime.datetime.now()
@@ -544,21 +547,24 @@ def readPngRgb(path):
     return np.ascontiguousarray(pixels[::-1, :, :3]).astype(np.uint8)     # VTK's first row is the bottom one
 
 
-def writeDicomImages(paths, pngPaths, title, patient, dicom, studyUID, sourceUIDs):
-    """The report pages as Secondary Capture images (RGB, one instance per page, one series in the source study);
-    the SOP Instance UIDs."""
+def writeDicomImages(paths, pngPaths, title, patient, dicom, studyUID, sourceUIDs, series=REPORT_SERIES,
+                     seriesUID=None, firstNumber=1, pixelSpacingMm=25.4 / IMAGE_DPI):
+    """Images (the report pages, screenshots) as Secondary Capture instances (RGB, one per image, one series in the
+    source study); the SOP Instance UIDs. pixelSpacingMm None: no Pixel Spacing (a screenshot)."""
     from pydicom.uid import generate_uid
     secondaryCapture = "1.2.840.10008.5.1.4.1.1.7"
-    seriesUID = generate_uid()
+    seriesUID = seriesUID or generate_uid()
     uids = []
-    for number, (path, png) in enumerate(zip(paths, pngPaths), start=1):
+    for number, (path, png) in enumerate(zip(paths, pngPaths), start=firstNumber):
         pixels = readPngRgb(png)
-        doc = _reportDataset(path, secondaryCapture, patient, dicom, studyUID, sourceUIDs, seriesUID, number)
+        doc = _reportDataset(path, secondaryCapture, patient, dicom, studyUID, sourceUIDs, seriesUID, number,
+                             series)
         doc.Modality = "OT"
         doc.ConversionType = "WSD"
         doc.ImageType = ["DERIVED", "SECONDARY"]
         doc.DerivationDescription = title
-        doc.ImageComments = f"{title}, page {number} of {len(pngPaths)}"
+        doc.ImageComments = (f"{title}, page {number} of {len(pngPaths)}" if series == REPORT_SERIES
+                             else f"{title} {number}")
         doc.BurnedInAnnotation = "YES"
         doc.PatientOrientation = ""
         doc.SamplesPerPixel = 3
@@ -569,7 +575,8 @@ def writeDicomImages(paths, pngPaths, title, patient, dicom, studyUID, sourceUID
         doc.BitsStored = 8
         doc.HighBit = 7
         doc.PixelRepresentation = 0
-        doc.PixelSpacing = [f"{25.4 / IMAGE_DPI:.6f}"] * 2      # the A4 page in mm
+        if pixelSpacingMm:
+            doc.PixelSpacing = [f"{pixelSpacingMm:.6f}"] * 2      # the A4 page in mm
         doc.PixelData = pixels.tobytes()
         _saveDataset(doc, path)
         uids.append(str(doc.SOPInstanceUID))

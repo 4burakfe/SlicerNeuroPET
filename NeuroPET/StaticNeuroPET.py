@@ -170,6 +170,7 @@ class StaticNeuroPETWidget(ToolbarMixin,
         NeuroWorkflowWidget.setup(self)
         self.pages[STEP_REG] = self._buildRegPage()
         self.pages[STEP_REVIEW] = self._buildReviewPage()
+        self._connectSegmentsAction()
         self.refresh()
 
     def volume(self):

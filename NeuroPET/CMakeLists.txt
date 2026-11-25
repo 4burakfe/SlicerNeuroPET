@@ -130,6 +130,11 @@ slicerMacroBuildScriptedModule(
     Resources/Icons/Review/Surface.svg
     Resources/Icons/Review/Colors.svg
     Resources/Icons/Review/Table.svg
+    Resources/Icons/Review/Segments.svg
+    Resources/Icons/Review/Restore3D.svg
+    Resources/Icons/Review/Fusion.svg
+    Resources/Icons/Review/ScreenshotClipboard.svg
+    Resources/Icons/Review/ScreenshotDICOM.svg
     Resources/Icons/Review/ReportPDF.svg
     Resources/Icons/Review/ReportDICOM.svg
   WITH_GENERIC_TESTS
