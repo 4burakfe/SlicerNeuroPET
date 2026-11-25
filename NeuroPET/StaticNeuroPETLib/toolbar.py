@@ -5,6 +5,8 @@ Part of the Static Neuro PET/SPECT module (StaticNeuroPET.py): the methods of To
 StaticNeuroPETWidget there.
 """
 
+import os
+
 import qt
 import slicer
 
@@ -12,7 +14,7 @@ from DICOMGatedDynamicPETLib import colormaps
 from NeuroWorkflowLib.base import NeuroWorkflowWidget
 from NeuroPETLib import neuroreview as nr, peel
 
-from StaticNeuroPETLib.constants import PEEL_DEPTHS, REVIEW_SCORE_WINDOWS, STEP_ICON_SIZE, STEP_REVIEW
+from StaticNeuroPETLib.constants import ICON_PATH, PEEL_DEPTHS, REVIEW_SCORE_WINDOWS, STEP_ICON_SIZE, STEP_REVIEW
 from StaticNeuroPETLib.helpers import _stepIcon
 
 
@@ -41,57 +43,64 @@ class ToolbarMixin:
         else:
             self._patientAction = toolbar.addWidget(self.patientLabel)
         self._patientAction.setVisible(False)
-        self._addReviewTools(toolbar)
+        window = slicer.util.mainWindow()
+        self.reviewToolbar = qt.QToolBar("Static Neuro review", window)
+        self.reviewToolbar.objectName = self.TOOLBAR_NAME + "Review"
+        self.reviewToolbar.setIconSize(qt.QSize(24, 24))
+        self.reviewToolbar.setToolButtonStyle(qt.Qt.ToolButtonTextBesideIcon)
+        self.reviewToolbar.hide()
+        window.addToolBarBreak()
+        window.addToolBar(self.reviewToolbar)
+        self._addReviewTools(toolbar, self.reviewToolbar)
+        toolbar.connect("visibilityChanged(bool)", lambda visible: self._updateReviewTools())
         return toolbar
 
-    def _addReviewTools(self, toolbar):
-        """The Panel button and the review's tools (layouts, slices, 3D-SSP, colors, table; shown on the review
-        step only) at the end of the workflow toolbar."""
-        panelButton = qt.QToolButton()
-        panelButton.setText("Panel")
-        panelButton.toolTip = "Show / hide the module panel on the left (more room for the views)"
-        panelButton.setToolButtonStyle(qt.Qt.ToolButtonTextOnly)
-        panelButton.setFocusPolicy(qt.Qt.NoFocus)
-        panelButton.connect("clicked()", self._toggleModulePanel)
-        toolbar.addSeparator()
-        toolbar.addWidget(panelButton)
-        self._reviewToolActions = [toolbar.addSeparator()]
-        for text, tip, fill in (
-                ("Single Layouts", "Review layouts on one monitor (slices, 3D-SSP, cut 3D-SSP, unfolded brain)",
-                 lambda m: self._fillLayoutMenu(m, dual=False)),
-                ("Dual Layouts", "Review layouts on two monitors (the 3D-SSP views on the second screen)",
-                 lambda m: self._fillLayoutMenu(m, dual=True)),
-                ("Slices", "The slices: score window, scores colored, the PET and fusion windows",
-                 self._fillSliceMenu),
-                ("3D-SSP", "The 3D-SSP: score window, scores colored, the patient window, lighting, outlines, views",
-                 self._fillSspMenu),
-                ("Colors", "Color maps of the PET, the scores and the 3D-SSP", self._fillColorMenu)):
-            button = qt.QToolButton()
-            button.setText(text)
-            button.toolTip = tip
-            button.setToolButtonStyle(qt.Qt.ToolButtonTextOnly)
-            button.setPopupMode(qt.QToolButton.InstantPopup)
+    def _addReviewTools(self, toolbar, reviewToolbar=None):
+        """Static review has its own row. Dynamic Compare uses its workflow row."""
+        def action(row, icon, label, tip):
+            item = qt.QAction(label, row)
+            item.toolTip = tip
+            if reviewToolbar is not None:
+                folder = os.path.join(os.path.dirname(ICON_PATH), "Review")
+                item.setIcon(qt.QIcon(os.path.join(folder, icon + ".svg")))
+            row.addAction(item)
+            button = row.widgetForAction(item)
             button.setFocusPolicy(qt.Qt.NoFocus)
-            menu = qt.QMenu(button)
-            button.setMenu(menu)
+            if row is toolbar:
+                button.setToolButtonStyle(qt.Qt.ToolButtonTextBesideIcon)
+                button.setIconSize(qt.QSize(24, 24))
+            return item
+
+        toolbar.addSeparator()
+        panel = action(toolbar, "Panel", "Panel", "Show or hide the module panel on the left")
+        panel.connect("triggered()", self._toggleModulePanel)
+
+        row = reviewToolbar if reviewToolbar is not None else toolbar
+        self._reviewToolActions = []
+        if reviewToolbar is not None:
+            pdf = action(row, "ReportPDF", "PDF", "Save the review report as a PDF")
+            pdf.connect("triggered()", self.onSaveReport)
+            dicom = action(row, "ReportDICOM", "DICOM", "Save the report as DICOM and add it to the DICOM database")
+            dicom.connect("triggered()", lambda: self.onSaveReport(asDicom=True))
+        self._reviewToolActions.append(row.addSeparator())
+        for icon, label, tip, fill in (
+                ("SingleLayout", "Single Layouts", "Review layouts on one monitor",
+                 lambda m: self._fillLayoutMenu(m, dual=False)),
+                ("DualLayouts", "Dual Layouts", "Review layouts on two monitors",
+                 lambda m: self._fillLayoutMenu(m, dual=True)),
+                ("Slices", "Slices", "Slice windows, scores, fusion and unfolded brain settings", self._fillSliceMenu),
+                ("Surface", "3D-SSP", "3D-SSP windows, scores, lighting, outlines and views", self._fillSspMenu),
+                ("Colors", "Colors", "Color maps of the PET, scores and 3D-SSP", self._fillColorMenu)):
+            item = action(row, icon, label, tip)
+            menu = qt.QMenu(label, row)
             menu.connect("aboutToShow()", lambda m=menu, f=fill: f(m))
-            self._reviewToolActions.append(toolbar.addWidget(button))
-        tableButton = qt.QToolButton()
-        tableButton.setText("Table")
-        tableButton.toolTip = "Show / hide the region table on the right of this layout"
-        tableButton.setToolButtonStyle(qt.Qt.ToolButtonTextOnly)
-        tableButton.setFocusPolicy(qt.Qt.NoFocus)
-        tableButton.connect("clicked()", self._toggleTable)
-        self._reviewToolActions.append(toolbar.addWidget(tableButton))
-        reportButton = qt.QToolButton()
-        reportButton.setText("PDF")
-        reportButton.toolTip = "Save the PDF report of the review (settings: the PDF report box of the review step)"
-        reportButton.setToolButtonStyle(qt.Qt.ToolButtonTextOnly)
-        reportButton.setFocusPolicy(qt.Qt.NoFocus)
-        reportButton.connect("clicked()", lambda: self.onSaveReport())
-        self._reviewToolActions.append(toolbar.addWidget(reportButton))
-        for action in self._reviewToolActions:
-            action.setVisible(False)
+            item.setMenu(menu)
+            row.widgetForAction(item).setPopupMode(qt.QToolButton.InstantPopup)
+            self._reviewToolActions.append(item)
+        table = action(row, "Table", "Table", "Show or hide the region table on the right")
+        table.connect("triggered()", self._toggleTable)
+        self._reviewToolActions.append(table)
+        self._updateReviewTools()
 
     @staticmethod
     def _toggleModulePanel():
@@ -102,6 +111,10 @@ class ToolbarMixin:
             dock.setVisible(not dock.visible)
 
     def _updateReviewTools(self):
+        if getattr(self, "reviewToolbar", None) is not None:
+            main = getattr(self, "toolbar", None)
+            self.reviewToolbar.setVisible(bool(main and main.visible and getattr(self, "current", None) == STEP_REVIEW))
+            return
         for action in getattr(self, "_reviewToolActions", []):
             try:
                 action.setVisible(getattr(self, "current", None) == STEP_REVIEW)

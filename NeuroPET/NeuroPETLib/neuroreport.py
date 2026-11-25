@@ -34,6 +34,7 @@ FOOTER_MM = 9.0             # the software and the page number at the bottom
 GAP_MM = 3.0                # between blocks
 BANNER_TOP_MM = 6.0         # the first page's banner this far from the top edge (full width)
 RESOLUTION_DPI = 300
+IMAGE_DPI = 200             # the DICOM report pages (A4 at 200 dpi: 1654 x 2339 pixels)
 
 # colours (r, g, b 0..255)
 RULE_COLOR = (90, 103, 112)
@@ -472,6 +473,109 @@ def _qt():
     return qt
 
 
+def _reportDataset(path, sopClass, patient, dicom, studyUID, sourceUIDs, seriesUID, number):
+    """A DICOM dataset with the report's patient, study and series (same study as the source PET)."""
+    from pydicom.dataset import Dataset, FileDataset, FileMetaDataset
+    from pydicom.uid import ExplicitVRLittleEndian, generate_uid
+
+    meta = FileMetaDataset()
+    meta.MediaStorageSOPClassUID = sopClass
+    meta.MediaStorageSOPInstanceUID = generate_uid()
+    meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    doc = FileDataset(path, {}, file_meta=meta, preamble=bytes(128))
+    doc.SOPClassUID = meta.MediaStorageSOPClassUID
+    doc.SOPInstanceUID = meta.MediaStorageSOPInstanceUID
+    doc.SpecificCharacterSet = "ISO_IR 192"
+    for key in ("StudyDate", "StudyTime", "StudyID", "AccessionNumber", "ReferringPhysicianName",
+                "PatientBirthDate"):
+        setattr(doc, key, dicom.get(key, ""))
+    for key in ("StudyDescription", "IssuerOfPatientID"):
+        if dicom.get(key):
+            setattr(doc, key, dicom[key])
+    doc.PatientID = patient.get("id") or dicom.get("PatientID") or ("" if sourceUIDs else studyUID)
+    doc.PatientName = (dicom.get("PatientName", "")
+                       if not patient.get("name") or patient["name"] == formatPersonName(dicom.get("PatientName"))
+                       else patient["name"])
+    doc.PatientSex = {"Female": "F", "Male": "M", "Other": "O"}.get(patient.get("sex"), dicom.get("PatientSex", ""))
+    doc.StudyInstanceUID = studyUID
+    doc.SeriesInstanceUID = seriesUID
+    doc.SeriesDescription = "Mergen Neuro PET report"
+    doc.SeriesNumber = 900
+    doc.InstanceNumber = number
+    doc.Manufacturer = SOFTWARE
+    created = datetime.datetime.now()
+    doc.SeriesDate = doc.ContentDate = created.strftime("%Y%m%d")
+    doc.SeriesTime = doc.ContentTime = created.strftime("%H%M%S")
+    if sourceUIDs and dicom.get("SOPClassUID"):
+        doc.SourceImageSequence = []
+        for uid in dict.fromkeys(sourceUIDs):
+            ref = Dataset()
+            ref.ReferencedSOPClassUID = dicom["SOPClassUID"]
+            ref.ReferencedSOPInstanceUID = uid
+            doc.SourceImageSequence.append(ref)
+    return doc
+
+
+def _saveDataset(doc, path):
+    import pydicom
+    if int(pydicom.__version_info__[0]) >= 3:
+        doc.save_as(path, enforce_file_format=True)
+    else:  # Slicer versions shipping pydicom 2.x
+        doc.is_little_endian = True
+        doc.is_implicit_VR = False
+        doc.save_as(path, write_like_original=False)
+
+
+def readPngRgb(path):
+    """An 8-bit RGB PNG as a (rows, columns, 3) uint8 array, top row first."""
+    import vtk
+    from vtk.util import numpy_support
+    reader = vtk.vtkPNGReader()
+    reader.SetFileName(path)
+    reader.Update()
+    image = reader.GetOutput()
+    columns, rows, _ = image.GetDimensions()
+    scalars = image.GetPointData().GetScalars()
+    if scalars is None or columns < 1 or rows < 1:
+        raise IOError(f"Could not read {path}")
+    pixels = numpy_support.vtk_to_numpy(scalars).reshape(rows, columns, -1)
+    if pixels.shape[2] == 1:
+        pixels = np.repeat(pixels, 3, axis=2)
+    return np.ascontiguousarray(pixels[::-1, :, :3]).astype(np.uint8)     # VTK's first row is the bottom one
+
+
+def writeDicomImages(paths, pngPaths, title, patient, dicom, studyUID, sourceUIDs):
+    """The report pages as Secondary Capture images (RGB, one instance per page, one series in the source study);
+    the SOP Instance UIDs."""
+    from pydicom.uid import generate_uid
+    secondaryCapture = "1.2.840.10008.5.1.4.1.1.7"
+    seriesUID = generate_uid()
+    uids = []
+    for number, (path, png) in enumerate(zip(paths, pngPaths), start=1):
+        pixels = readPngRgb(png)
+        doc = _reportDataset(path, secondaryCapture, patient, dicom, studyUID, sourceUIDs, seriesUID, number)
+        doc.Modality = "OT"
+        doc.ConversionType = "WSD"
+        doc.ImageType = ["DERIVED", "SECONDARY"]
+        doc.DerivationDescription = title
+        doc.ImageComments = f"{title}, page {number} of {len(pngPaths)}"
+        doc.BurnedInAnnotation = "YES"
+        doc.PatientOrientation = ""
+        doc.SamplesPerPixel = 3
+        doc.PhotometricInterpretation = "RGB"
+        doc.PlanarConfiguration = 0
+        doc.Rows, doc.Columns = int(pixels.shape[0]), int(pixels.shape[1])
+        doc.BitsAllocated = 8
+        doc.BitsStored = 8
+        doc.HighBit = 7
+        doc.PixelRepresentation = 0
+        doc.PixelSpacing = [f"{25.4 / IMAGE_DPI:.6f}"] * 2      # the A4 page in mm
+        doc.PixelData = pixels.tobytes()
+        _saveDataset(doc, path)
+        uids.append(str(doc.SOPInstanceUID))
+    return uids
+
+
 class PdfReport:
     """An A4 portrait PDF drawn top to bottom in blocks (a block that does not fit goes on the next page):
 
@@ -549,20 +653,34 @@ class PdfReport:
                 pass
         return self._draw(self.path, pages)
 
+    def renderImages(self, folder, prefix="page", dpi=IMAGE_DPI):
+        """The pages drawn as images (PNG files in folder, white A4 at dpi; two passes like finish()); their paths."""
+        pages = len(self._draw(None, None, imageFolder=folder, prefix=None, dpi=dpi))     # counted, not saved
+        return self._draw(None, pages, imageFolder=folder, prefix=prefix, dpi=dpi)
+
     # drawing
-    def _draw(self, path, total):
+    def _draw(self, path, total, imageFolder=None, prefix="page", dpi=RESOLUTION_DPI):
+        """Draw the blocks: to the PDF path (the page count returned), or as page images into imageFolder (their
+        paths returned)."""
         qt = _qt()
-        writer = self._writerFor(qt, path)
-        painter = qt.QPainter()
-        if not painter.begin(writer):
-            raise IOError(f"Could not write {path}")
-        self._qt, self._writer, self._painter, self._total = qt, writer, painter, total
-        self._scale = RESOLUTION_DPI / 25.4           # device pixels per mm
+        self._qt, self._total = qt, total
+        self._images = None
+        if imageFolder is None:
+            writer = self._writerFor(qt, path)
+            self._scale = RESOLUTION_DPI / 25.4           # device pixels per mm
+        else:
+            writer = None
+            self._images = dict(folder=imageFolder, prefix=prefix, dpi=dpi, paths=[])
+            self._scale = dpi / 25.4
+        self._writer = writer
+        painter = self._painter = qt.QPainter()
+        device = writer if writer is not None else self._pageImage()
+        if not painter.begin(device):
+            raise IOError(f"Could not write {path or imageFolder}")
         self._page = 1
         self._pageTop = MARGIN_MM + HEADER_MM
         try:
-            painter.setRenderHint(qt.QPainter.Antialiasing, True)
-            painter.setRenderHint(qt.QPainter.SmoothPixmapTransform, True)
+            self._renderHints()
             self._startPage()
             blocks = list(self._blocks)
             index = 0
@@ -580,7 +698,36 @@ class PdfReport:
             self._footer()
         finally:
             painter.end()
+        if self._images is not None:
+            self._savePageImage()
+            return list(self._images["paths"])
         return self._page
+
+    def _renderHints(self):
+        self._painter.setRenderHint(self._qt.QPainter.Antialiasing, True)
+        self._painter.setRenderHint(self._qt.QPainter.SmoothPixmapTransform, True)
+        self._painter.setRenderHint(self._qt.QPainter.TextAntialiasing, True)
+
+    def _pageImage(self):
+        """A new white page image (A4 at the image dpi; the dpi set so point sizes match the PDF)."""
+        qt, dpi = self._qt, self._images["dpi"]
+        image = qt.QImage(int(round(PAGE_WIDTH_MM / 25.4 * dpi)), int(round(PAGE_HEIGHT_MM / 25.4 * dpi)),
+                          qt.QImage.Format_RGB32)
+        image.setDotsPerMeterX(int(round(dpi / 0.0254)))
+        image.setDotsPerMeterY(int(round(dpi / 0.0254)))
+        image.fill(qt.QColor(255, 255, 255))
+        self._images["image"] = image
+        return image
+
+    def _savePageImage(self):
+        images = self._images
+        if images["prefix"] is None:
+            images["paths"].append(None)
+            return
+        path = os.path.join(images["folder"], f"{images['prefix']}_{len(images['paths']) + 1:02d}.png")
+        if not images["image"].save(path, "PNG"):
+            raise IOError(f"Could not write {path}")
+        images["paths"].append(path)
 
     @staticmethod
     def _writerFor(qt, path):
@@ -697,7 +844,14 @@ class PdfReport:
 
     def _newPage(self):
         self._footer()
-        self._writer.newPage()
+        if self._images is None:
+            self._writer.newPage()
+        else:                       # the page image saved, the painter moved to a new one
+            self._painter.end()
+            self._savePageImage()
+            if not self._painter.begin(self._pageImage()):
+                raise IOError("Could not draw the next report page.")
+            self._renderHints()
         self._page += 1
         self._startPage()
 

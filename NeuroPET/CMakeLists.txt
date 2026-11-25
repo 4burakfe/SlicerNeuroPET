@@ -121,7 +121,17 @@ slicerMacroBuildScriptedModule(
   SCRIPTS
     ${STATIC_NEURO_MODULE_NAME}.py
     ${STATIC_NEURO_LIB_SCRIPTS}
-  RESOURCES Resources/Icons/${STATIC_NEURO_MODULE_NAME}.png
+  RESOURCES
+    Resources/Icons/${STATIC_NEURO_MODULE_NAME}.png
+    Resources/Icons/Review/Panel.svg
+    Resources/Icons/Review/SingleLayout.svg
+    Resources/Icons/Review/DualLayouts.svg
+    Resources/Icons/Review/Slices.svg
+    Resources/Icons/Review/Surface.svg
+    Resources/Icons/Review/Colors.svg
+    Resources/Icons/Review/Table.svg
+    Resources/Icons/Review/ReportPDF.svg
+    Resources/Icons/Review/ReportDICOM.svg
   WITH_GENERIC_TESTS
   )
 

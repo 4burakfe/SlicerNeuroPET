@@ -9,7 +9,6 @@ StaticNeuroPETWidget there. The layout of the PDF and its drawing are in NeuroPE
 import json
 import logging
 import os
-import shutil
 import tempfile
 
 import ctk
@@ -27,7 +26,9 @@ from StaticNeuroPETLib.constants import NO_SCORE_COLORMAP, REPORT_BANNER_PATH, S
 REPORT_DICOM_KEYWORDS = ("Modality", "PatientName", "PatientID", "PatientBirthDate", "PatientSex", "PatientAge",
                          "PatientWeight", "StudyDate", "SeriesDate", "SeriesTime", "AcquisitionDate",
                          "AcquisitionTime", "AcquisitionDateTime", "ActualFrameDuration", "NumberOfFrames",
-                         "Manufacturer", "ManufacturerModelName", "InstitutionName", "StudyDescription")
+                         "Manufacturer", "ManufacturerModelName", "InstitutionName", "StudyDescription",
+                         "StudyTime", "StudyID", "AccessionNumber", "ReferringPhysicianName", "IssuerOfPatientID",
+                         "StudyInstanceUID", "SOPClassUID")
 REPORT_RADIOPHARMACEUTICAL_KEYWORDS = ("Radiopharmaceutical", "RadiopharmaceuticalStartTime",
                                        "RadiopharmaceuticalStartDateTime", "RadionuclideTotalDose")
 REPORT_SLICE_MM = 50.0      # a slice row at most this high (mm): the info table, both rows and color bars on page 1
@@ -395,49 +396,129 @@ class ReportMixin:
                              "above). Reference regions are not listed.", size=7, italic=True)
 
     # --- saving ------------------------------------------------------------------------------------------------
-    def onSaveReport(self):
-        result = self.reviewResult
-        if result is None:
-            slicer.util.warningDisplay("Compare the patient first (Review step).", windowTitle="PDF report")
+    def _renderReport(self, path, work, patient, study, scan, comparison, imageFolder=None):
+        """The report drawn to the PDF path (the page count returned), or as page images (PNG) into imageFolder
+        (their paths returned)."""
+        report = rp.PdfReport(path, self.REPORT_TITLE, REPORT_BANNER_PATH)
+        report.heading("Patient and scan")
+        report.keyValues(rp.infoRows(patient, study, scan, comparison))
+        report.paragraph(rp.DISCLAIMER, size=9, bold=True, color=rp.DISCLAIMER_COLOR)     # first page, red
+        self._reportSlices(report, work)
+        self._reportSsp(report, work)
+        self._reportTable(report)
+        comment = self.reportCommentEdit.toPlainText().strip()
+        if comment:
+            report.keepWithNext()
+            report.heading("Comment")
+            report.paragraph(comment, size=9.5)
+        notes = rp.plainText(self.compareLabel.text)
+        if notes:
+            report.paragraph("Comparison: " + notes, size=7, italic=True)
+        if imageFolder:
+            return report.renderImages(imageFolder)
+        return report.finish()
+
+    @staticmethod
+    def _reportStudyUID(volume, dicom, sourceUIDs, patient):
+        if sourceUIDs:
+            if not dicom.get("StudyInstanceUID") or not dicom.get("SOPClassUID"):
+                raise ValueError("The source study could not be read from the DICOM database.")
+            if dicom.get("PatientID") and patient.get("id") and dicom["PatientID"] != patient["id"]:
+                raise ValueError("The patient ID on the Data step differs from the source DICOM study.")
+            return dicom["StudyInstanceUID"]
+        # File-based inputs have no DICOM study. Keep repeated reports together in the scene.
+        from pydicom.uid import generate_uid
+        key = NEURO_PREFIX + "ReportStudyInstanceUID"
+        uid = volume.GetAttribute(key)
+        if not uid:
+            uid = generate_uid()
+            volume.SetAttribute(key, uid)
+        return uid
+
+    @staticmethod
+    def _indexReport(paths, uids):
+        database = slicer.dicomDatabase
+        if database is None or not database.isOpen:
+            raise RuntimeError("Open a Slicer DICOM database to import the saved files.")
+        indexer = ctk.ctkDICOMIndexer()
+        for path in paths:
+            indexer.addFile(database, path, True)    # keep a managed copy when the exported file moves
+        indexer.waitForImportFinished()
+        for uid in uids:
+            indexed = database.fileForInstance(uid)
+            if not indexed or not os.path.isfile(indexed):
+                raise IOError("The saved report could not be found in the DICOM database.")
+
+    @staticmethod
+    def _dicomPagePaths(path, pages):
+        """One file per page: the chosen name itself for one page, else name_page1.dcm, name_page2.dcm, ..."""
+        if pages == 1:
+            return [path]
+        stem, ext = os.path.splitext(path)
+        return [f"{stem}_page{number}{ext}" for number in range(1, pages + 1)]
+
+    def onSaveReport(self, asDicom=False):
+        kind = "DICOM" if asDicom else "PDF"
+        title = kind + " report"
+        if self.reviewResult is None:
+            slicer.util.warningDisplay("Compare the patient first (Review step).", windowTitle=title)
             return
+        volume = self.reviewVolume()
         patient, study, scan, comparison, dicom = self._reportContent()
         folder = self._reportSettings().get("folder") or os.path.expanduser("~")
         name = rp.reportFileName(patient.get("name"), study.get("date"), self.REPORT_FILE_SUFFIX)
-        path = qt.QFileDialog.getSaveFileName(slicer.util.mainWindow(), "Save the PDF report",
-                                              os.path.join(folder, name), "PDF (*.pdf)")
+        ext = ".dcm" if asDicom else ".pdf"
+        name = os.path.splitext(name)[0] + ext
+        path = qt.QFileDialog.getSaveFileName(slicer.util.mainWindow(), "Save the " + title,
+                                              os.path.join(folder, name), f"{kind} (*{ext})")
         if not path:
             return
         path = str(path)
-        if not path.lower().endswith(".pdf"):
-            path += ".pdf"
-        self._saveReportSettings(os.path.dirname(path))
-        work = tempfile.mkdtemp(prefix="NeuroReport")
+        if not path.lower().endswith(ext):
+            path += ext
+        folder = os.path.dirname(path)
+        self._saveReportSettings(folder)
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
-            report = rp.PdfReport(path, self.REPORT_TITLE, REPORT_BANNER_PATH)
-            report.heading("Patient and scan")
-            report.keyValues(rp.infoRows(patient, study, scan, comparison))
-            report.paragraph(rp.DISCLAIMER, size=9, bold=True, color=rp.DISCLAIMER_COLOR)     # first page, red
-            self._reportSlices(report, work)
-            self._reportSsp(report, work)
-            self._reportTable(report)
-            comment = self.reportCommentEdit.toPlainText().strip()
-            if comment:
-                report.keepWithNext()
-                report.heading("Comment")
-                report.paragraph(comment, size=9.5)
-            notes = rp.plainText(self.compareLabel.text)
-            if notes:
-                report.paragraph("Comparison: " + notes, size=7, italic=True)
-            pages = report.finish()
+            # Stage the final file on the destination filesystem so a failed export preserves an existing report.
+            with tempfile.TemporaryDirectory(dir=folder) as staging, tempfile.TemporaryDirectory() as work:
+                if asDicom:     # the pages as images (Secondary Capture), viewable in any DICOM viewer
+                    sourceUIDs = (volume.GetAttribute("DICOM.instanceUIDs") or "").split()
+                    studyUID = self._reportStudyUID(volume, dicom, sourceUIDs, patient)
+                    pageFolder = os.path.join(work, "pages")
+                    os.makedirs(pageFolder)
+                    images = self._renderReport(None, work, patient, study, scan, comparison, imageFolder=pageFolder)
+                    pages = len(images)
+                    paths = self._dicomPagePaths(path, pages)
+                    staged = [os.path.join(staging, f"page{number}.dcm") for number in range(1, pages + 1)]
+                    uids = rp.writeDicomImages(staged, images, self.REPORT_TITLE, patient, dicom, studyUID,
+                                               sourceUIDs)
+                    for source, target in zip(staged, paths):
+                        os.replace(source, target)
+                else:
+                    pdfPath = os.path.join(staging, "report.pdf")
+                    pages = self._renderReport(pdfPath, work, patient, study, scan, comparison)
+                    os.replace(pdfPath, path)
         except Exception as error:
-            logging.exception("Static Neuro: the PDF report failed")
-            slicer.util.errorDisplay(f"Could not write the PDF report:\n{error}", windowTitle="PDF report")
+            logging.exception("Static Neuro: could not write the %s report", kind)
+            slicer.util.errorDisplay(f"Could not write the {title}:\n{error}", windowTitle=title)
             return
         finally:
             qt.QApplication.restoreOverrideCursor()
-            shutil.rmtree(work, ignore_errors=True)
-        self.reportLabel.text = f"Saved: {path} ({pages} page{'s' if pages != 1 else ''})"
-        slicer.util.showStatusMessage(f"Static Neuro: PDF report saved ({path})", 5000)
-        if self.reportOpenCheck.checked:
+        message = f"Saved: {path} ({pages} page{'s' if pages != 1 else ''})"
+        if asDicom:
+            if pages > 1:
+                message = (f"Saved: {os.path.basename(paths[0])} ... {os.path.basename(paths[-1])} in {folder} "
+                           f"({pages} pages)")
+            try:
+                self._indexReport(paths, uids)
+            except Exception as error:
+                logging.exception("Static Neuro: could not index the saved DICOM report")
+                self.reportLabel.text = message + " — DICOM database import failed."
+                slicer.util.errorDisplay(f"{self.reportLabel.text}\n{error}", windowTitle=title)
+                return
+            message += " — added to the DICOM database."
+        self.reportLabel.text = message
+        slicer.util.showStatusMessage(message, 5000)
+        if not asDicom and self.reportOpenCheck.checked:
             qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(path))

@@ -267,6 +267,11 @@ class StaticNeuroPETWidget(ToolbarMixin,
         if getattr(self, "current", None) == STEP_REVIEW:
             self._exitReviewViews()
         NeuroWorkflowWidget.cleanup(self)
+        if getattr(self, "reviewToolbar", None) is not None:
+            slicer.util.mainWindow().removeToolBarBreak(self.reviewToolbar)
+            slicer.util.mainWindow().removeToolBar(self.reviewToolbar)
+            self.reviewToolbar.deleteLater()
+            self.reviewToolbar = None
 
     def onSceneClose(self, caller, event):
         NeuroWorkflowWidget.onSceneClose(self, caller, event)
