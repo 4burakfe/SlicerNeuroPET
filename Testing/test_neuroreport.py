@@ -74,3 +74,27 @@ def test_file_name_and_ticks():
     assert rp.reportFileName("A/B:C") == "A_B_C_NeuroPET.pdf"
     assert 0.0 in rp.colorbarTicks(-7.0, 7.0)
     assert rp.colorbarTicks(0.0, 4.0) == [0.0, 1.0, 2.0, 3.0, 4.0]
+
+
+def test_slices_from_the_image():
+    import numpy as np
+    matrix = np.array([[2.0, 0, 0, -10], [0, 2.0, 0, -20], [0, 0, 2.0, -30], [0, 0, 0, 1]])
+    array = np.zeros((10, 20, 30), np.float32)          # (k, j, i)
+    array[2:8, 5:15, 5:25] = 1.0
+    array[4, 10, 20] = 5.0                               # i = 20: x = +30 mm (the patient's right)
+    low, high = rp.contentBox(array, matrix, marginMm=0.0)
+    assert np.allclose(low, [0.0, -10.0, -26.0]) and np.allclose(high, [38.0, 8.0, -16.0])
+    # axial as in Slicer: screen right = the patient's left (-x), screen up = anterior
+    points = rp.planePoints((low, high), (30.0, 0.0, -22.0), (-1, 0, 0), (0, 1, 0), 2.0)
+    assert points.shape == (10, 20, 3)
+    assert np.allclose(points[0, 0], [38.0, 8.0, -22.0])      # top left: right, anterior
+    values = rp.sampleVolume(array, matrix, points)
+    assert values[4, 4] == 5.0                                 # x = 30, y = 0
+    assert rp.sampleVolume(array, matrix, np.array([[1000.0, 0, 0]]), cval=-1.0)[0] == -1.0
+    assert rp.sampleVolume(array, matrix, np.array([[29.0, 0.0, -22.0]]))[0] == 3.0     # halfway 5 -> 1
+    assert rp.sampleVolume(array, matrix, np.array([[29.2, 0.0, -22.0]]), nearest=True)[0] == 5.0
+    rgb = rp.colorize(np.array([0.0, 5.0, 10.0]), np.tile(np.linspace(0, 1, 256)[:, None], (1, 3)), 0.0, 10.0)
+    assert np.allclose(rgb[:, 0], [0.0, 128 / 255.0, 1.0], atol=0.01)
+    rgba = np.array([[1.0, 0, 0, 1.0], [0, 0, 1.0, 0.0]])
+    out = rp.overlay(np.full((2, 3), 0.5), np.array([0.0, 1.0]), rgba, 0.0, 1.0)
+    assert np.allclose(out, [[1.0, 0, 0], [0.5, 0.5, 0.5]])

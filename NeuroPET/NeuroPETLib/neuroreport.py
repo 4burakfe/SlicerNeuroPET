@@ -18,6 +18,8 @@ import math
 import os
 import re
 
+import numpy as np
+
 TITLE = "Brain PET / SPECT report"
 DISCLAIMER = ("For research use only. A quantitative comparison with a normal database; it does not replace the reading "
               "of the images by a physician and is not to be used alone for a diagnosis.")
@@ -30,6 +32,7 @@ MARGIN_MM = 12.0
 HEADER_MM = 14.0            # the title line and its rule at the top of each page
 FOOTER_MM = 9.0             # the software and the page number at the bottom
 GAP_MM = 3.0                # between blocks
+BANNER_TOP_MM = 6.0         # the first page's banner this far from the top edge (full width)
 RESOLUTION_DPI = 300
 
 # colours (r, g, b 0..255)
@@ -270,6 +273,121 @@ def colorbarTicks(low, high, count=5):
     return ticks
 
 
+# --- slices from the images (not from the views) ----------------------------------------------------------
+def contentBox(array, ijkToRas, fraction=0.02, marginMm=4.0):
+    """(RAS minimum, RAS maximum) of the voxels above fraction of the array's maximum (the head; the black around
+    it left out), margin mm wider; the whole grid when nothing is above it."""
+    array = np.asarray(array)
+    finite = np.where(np.isfinite(array), array, 0)
+    top = float(finite.max()) if finite.size else 0.0
+    mask = finite > fraction * top if top > 0 else np.ones(finite.shape, bool)
+    if not mask.any():
+        mask = np.ones(finite.shape, bool)
+    index = [np.flatnonzero(mask.any(axis=tuple(a for a in range(3) if a != axis))) for axis in range(3)]
+    k0, k1 = index[0][[0, -1]]
+    j0, j1 = index[1][[0, -1]]
+    i0, i1 = index[2][[0, -1]]
+    corners = np.array([[i, j, k, 1.0] for i in (i0, i1) for j in (j0, j1) for k in (k0, k1)], dtype=np.float64)
+    ras = (np.asarray(ijkToRas, np.float64) @ corners.T).T[:, :3]
+    return ras.min(axis=0) - marginMm, ras.max(axis=0) + marginMm
+
+
+def planePoints(box, point, xAxis, yAxis, spacingMm):
+    """RAS points (rows, columns, 3) of a slice through point with screen axes xAxis (left to right) and yAxis (bottom
+    to top), covering the box (RAS minimum, maximum) as seen in that plane: the first row at its top."""
+    xAxis = np.asarray(xAxis, np.float64) / np.linalg.norm(xAxis)
+    yAxis = np.asarray(yAxis, np.float64) / np.linalg.norm(yAxis)
+    low, high = (np.asarray(v, np.float64) for v in box)
+    corners = np.array([[x, y, z] for x in (low[0], high[0]) for y in (low[1], high[1]) for z in (low[2], high[2])])
+    u, v = corners @ xAxis, corners @ yAxis
+    point = np.asarray(point, np.float64)
+    columns = max(2, int(np.ceil((u.max() - u.min()) / spacingMm)) + 1)
+    rows = max(2, int(np.ceil((v.max() - v.min()) / spacingMm)) + 1)
+    us = u.min() + spacingMm * np.arange(columns)
+    vs = v.max() - spacingMm * np.arange(rows)          # top row first
+    base = point - (point @ xAxis) * xAxis - (point @ yAxis) * yAxis
+    return base + us[None, :, None] * xAxis + vs[:, None, None] * yAxis
+
+
+def sampleVolume(array, ijkToRas, points, nearest=False, cval=0.0):
+    """Values of an array (k, j, i[, c]) with its 4 x 4 ijkToRas at RAS points (..., 3): trilinear (nearest: the
+    nearest voxel), cval outside the grid."""
+    array = np.asarray(array)
+    shape = points.shape[:-1]
+    flat = points.reshape(-1, 3)
+    ijk = (np.linalg.inv(np.asarray(ijkToRas, np.float64)) @ np.c_[flat, np.ones(len(flat))].T).T[:, :3]
+    kji = ijk[:, ::-1]
+    size = np.array(array.shape[:3])
+    extra = array.shape[3:]
+    out = np.full((len(flat),) + extra, cval, dtype=np.float32)
+    if nearest:
+        index = np.rint(kji).astype(np.int64)
+        inside = np.all((index >= 0) & (index < size), axis=1)
+        k, j, i = index[inside].T
+        out[inside] = array[k, j, i]
+        return out.reshape(shape + extra)
+    base = np.floor(kji).astype(np.int64)
+    frac = (kji - base).astype(np.float32)
+    inside = np.all((kji >= 0) & (kji <= size - 1), axis=1)
+    base, frac = base[inside], frac[inside]
+    total = np.zeros((len(base),) + extra, np.float32)
+    for dk in (0, 1):
+        for dj in (0, 1):
+            for di in (0, 1):
+                k = np.minimum(base[:, 0] + dk, size[0] - 1)
+                j = np.minimum(base[:, 1] + dj, size[1] - 1)
+                i = np.minimum(base[:, 2] + di, size[2] - 1)
+                weight = ((frac[:, 0] if dk else 1 - frac[:, 0]) * (frac[:, 1] if dj else 1 - frac[:, 1])
+                          * (frac[:, 2] if di else 1 - frac[:, 2]))
+                values = array[k, j, i].astype(np.float32)
+                total += values * (weight.reshape((-1,) + (1,) * len(extra)))
+    out[inside] = total
+    return out.reshape(shape + extra)
+
+
+def colorize(values, rgb, low, high):
+    """RGB (0..1, ... x 3) of values through a colour table (n x 3 or n x 4, 0..1) over the window low..high."""
+    table = np.asarray(rgb, np.float32)[:, :3]
+    high = high if high > low else low + 1e-6
+    index = np.clip((np.asarray(values, np.float32) - low) / (high - low), 0.0, 1.0) * (len(table) - 1)
+    index = np.where(np.isfinite(index), index, 0).astype(np.int64)
+    return table[index]
+
+
+def overlay(background, values, rgba, low, high, transparent=None):
+    """background RGB (0..1) with values coloured through rgba (n x 4) over low..high on top, each by its colour's
+    alpha; transparent: a boolean array of the values not drawn."""
+    table = np.asarray(rgba, np.float32)
+    high = high if high > low else low + 1e-6
+    index = np.clip((np.asarray(values, np.float32) - low) / (high - low), 0.0, 1.0) * (len(table) - 1)
+    index = np.where(np.isfinite(index), index, 0).astype(np.int64)
+    colors = table[index]
+    alpha = colors[..., 3:4] if table.shape[1] > 3 else np.ones(colors.shape[:-1] + (1,), np.float32)
+    if transparent is not None:
+        alpha = np.where(np.asarray(transparent)[..., None], 0.0, alpha)
+    return background * (1 - alpha) + colors[..., :3] * alpha
+
+
+def writePng(rgb, path):
+    """An RGB image (rows from the top, 0..1 floats or uint8) as a PNG file (VTK)."""
+    import vtk
+    from vtk.util import numpy_support
+    rgb = np.asarray(rgb)
+    if rgb.dtype != np.uint8:
+        rgb = np.clip(np.rint(np.asarray(rgb, np.float32) * 255.0), 0, 255).astype(np.uint8)
+    rows, columns = rgb.shape[:2]
+    image = vtk.vtkImageData()
+    image.SetDimensions(columns, rows, 1)
+    data = numpy_support.numpy_to_vtk(np.ascontiguousarray(rgb[::-1]).reshape(-1, 3), deep=True)     # VTK: bottom up
+    data.SetNumberOfComponents(3)
+    image.GetPointData().SetScalars(data)
+    writer = vtk.vtkPNGWriter()
+    writer.SetFileName(path)
+    writer.SetInputData(image)
+    writer.Write()
+    return path
+
+
 # --- 3D-SSP views off screen ----------------------------------------------------------------------------
 def renderSurfaceViews(views, rgba, window, folder, prefix="ssp", size=SURFACE_VIEW_PX, lighting=True,
                        background=SURFACE_BACKGROUND):
@@ -390,6 +508,12 @@ class PdfReport:
         self._blocks.append(("imageGrid", (images, columns), dict(captions=captions, background=background,
                                                                   cellAspect=cellAspect, sideLabels=sideLabels,
                                                                   rowTitles=rowTitles, maxCellMm=maxCellMm)))
+
+    def imageRow(self, images, captions=None, rowTitle=None, maxHeightMm=50.0):
+        """Images side by side at one height (each as wide as its aspect asks; no padding), at most maxHeightMm high
+        and as wide as the page; the row centred."""
+        self._blocks.append(("imageRow", (images,), dict(captions=captions, rowTitle=rowTitle,
+                                                         maxHeightMm=maxHeightMm)))
 
     def colorbar(self, rgba, low, high, title="", labelFormat="{:.1f}"):
         self._blocks.append(("colorbar", (rgba, low, high, title, labelFormat), {}))
@@ -549,8 +673,8 @@ class PdfReport:
         banner = self._banner() if self._page == 1 else None
         if banner is not None:          # the banner across the whole first page (edge to edge), the title under it
             height = PAGE_WIDTH_MM * banner.height() / float(max(banner.width(), 1))
-            self._painter.drawImage(self._rect(0, 0, PAGE_WIDTH_MM, height), banner)
-            top = height + 4.0
+            self._painter.drawImage(self._rect(0, BANNER_TOP_MM, PAGE_WIDTH_MM, height), banner)
+            top = BANNER_TOP_MM + height + 4.0
         self._text(x, top, w * 0.7, 8, self.title, size=13, bold=True, color=HEADING_COLOR)
         self._text(x + w * 0.3, top, w * 0.7, 8, f"Created {self.created.strftime('%d.%m.%Y %H:%M')}",
                    flags=qt.Qt.AlignRight | qt.Qt.AlignVCenter, size=7.5, color=LABEL_COLOR)
@@ -596,6 +720,9 @@ class PdfReport:
             rows = math.ceil(len(images) / columns)
             caption = 4.0 if kwargs.get("captions") else 0.0
             return rows * (w * kwargs.get("cellAspect", 1.0) + caption) + GAP_MM
+        if kind == "imageRow":
+            return self._rowGeometry(args[0], kwargs.get("rowTitle"), kwargs.get("maxHeightMm", 50.0))[0] + \
+                (4.0 if kwargs.get("captions") else 0.0) + GAP_MM
         if kind == "colorbar":
             return 12.0
         if kind == "table":
@@ -711,6 +838,49 @@ class PdfReport:
                                color=LABEL_COLOR)
             self._y += cellH + captionH
         self._y += GAP_MM
+
+    ROW_GAP_MM = 1.5
+
+    def _rowGeometry(self, images, rowTitle, maxHeightMm):
+        """(row height, [(width, height)], left) of an image row: one scale (mm per pixel) for all its images (slices
+        sampled at one spacing keep their sizes against each other), the row at most maxHeightMm high and as wide as
+        the page."""
+        titleWidth = 6.0 if rowTitle else 0.0
+        sizes = [(float(image.width()), float(image.height())) if image is not None and not image.isNull()
+                 and image.width() > 0 and image.height() > 0 else (1.0, 1.0) for image in images]
+        gaps = self.ROW_GAP_MM * max(len(images) - 1, 0)
+        available = self._width() - titleWidth - gaps
+        scale = min(available / max(sum(w for w, _ in sizes), 1e-6),
+                    float(maxHeightMm) / max(max((h for _, h in sizes), default=1.0), 1e-6))
+        cells = [(w * scale, h * scale) for w, h in sizes]
+        height = max((h for _, h in cells), default=0.0)
+        used = sum(w for w, _ in cells) + gaps
+        left = MARGIN_MM + titleWidth + (self._width() - titleWidth - used) / 2.0
+        return height, cells, left
+
+    def _imageRow(self, images, captions=None, rowTitle=None, maxHeightMm=50.0):
+        qt = self._qt
+        height, cells, left = self._rowGeometry(images, rowTitle, maxHeightMm)
+        captionH = 4.0 if captions else 0.0
+        self._ensure(height + captionH)
+        if rowTitle:
+            self._painter.save()
+            self._font(8, True)
+            self._pen(LABEL_COLOR)
+            center = qt.QPointF(self._mm(left - 3.5), self._mm(self._y + height / 2))
+            self._painter.translate(center)
+            self._painter.rotate(-90)
+            self._painter.drawText(qt.QRectF(-self._mm(height / 2), -self._mm(3.0), self._mm(height), self._mm(6.0)),
+                                   int(qt.Qt.AlignCenter), str(rowTitle))
+            self._painter.restore()
+        x = left
+        for index, (image, (width, imageHeight)) in enumerate(zip(images, cells)):
+            self._drawImageFit(image, x, self._y + (height - imageHeight) / 2.0, width, imageHeight, None)
+            if captions and index < len(captions) and captions[index]:
+                self._text(x, self._y + height, width, captionH, captions[index], flags=qt.Qt.AlignCenter, size=7.5,
+                           color=LABEL_COLOR)
+            x += width + self.ROW_GAP_MM
+        self._y += height + captionH + GAP_MM
 
     def _colorbar(self, rgba, low, high, title="", labelFormat="{:.1f}"):
         qt = self._qt

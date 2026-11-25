@@ -17,7 +17,7 @@ import numpy as np
 import qt
 import slicer
 
-from NeuroWorkflowLib.base import METHOD_ANATOMY, METHOD_PET, METHOD_PET_TEMPLATE, NEURO_PREFIX, _button
+from NeuroWorkflowLib.base import METHOD_ANATOMY, METHOD_PET, METHOD_PET_TEMPLATE, NEURO_PREFIX, _button, _ijkToRas
 from NeuroPETLib import neuroreport as rp, neuroreview as nr, normaldb, ssp, staticneuro as sn
 
 from StaticNeuroPETLib.constants import NO_SCORE_COLORMAP, REPORT_BANNER_PATH, SETTINGS_REPORT, SSP_CAMERA_DISTANCE
@@ -30,7 +30,7 @@ REPORT_DICOM_KEYWORDS = ("Modality", "PatientName", "PatientID", "PatientBirthDa
                          "Manufacturer", "ManufacturerModelName", "InstitutionName", "StudyDescription")
 REPORT_RADIOPHARMACEUTICAL_KEYWORDS = ("Radiopharmaceutical", "RadiopharmaceuticalStartTime",
                                        "RadiopharmaceuticalStartDateTime", "RadionuclideTotalDose")
-REPORT_SLICE_MM = 50.0      # a slice's width in the PDF: the info table, both slice rows and their color bars on page 1
+REPORT_SLICE_MM = 50.0      # a slice row at most this high (mm): the info table, both rows and color bars on page 1
 NORMALIZATION_TITLES = {METHOD_PET: "PET/SPECT to MR template", METHOD_ANATOMY: "CT/MR to MR template",
                         METHOD_PET_TEMPLATE: "PET/SPECT to PET template"}
 
@@ -189,57 +189,96 @@ class ReportMixin:
             return rgb
         return np.hstack([rgb, np.ones((len(rgb), 1))])
 
-    def _reportSlices(self, report):
-        """The review's slices as on screen (PET row, score row) with a colour bar under each row."""
-        layoutManager = slicer.app.layoutManager()
-        widgets = self._reviewSliceWidgets() if layoutManager is not None else []
+    def _reportSlicePoint(self, box):
+        """(RAS point the slices go through, {orientation: (screen x, screen y)}) from the review's slice views (their
+        slice nodes, also when the layout does not show them): the slices of the screen; the box's centre without."""
+        point = 0.5 * (np.asarray(box[0]) + np.asarray(box[1]))
+        axes = {}
+        for orientation, _ in nr.ORIENTATIONS:
+            node = None
+            for row in (nr.PET_ROW, nr.SCORE_ROW):
+                node = slicer.mrmlScene.GetSingletonNode(nr.sliceViewName(row, orientation), "vtkMRMLSliceNode")
+                if node is not None:
+                    break
+            if node is None:
+                continue
+            matrix = node.GetSliceToRAS()
+            column = [np.array([matrix.GetElement(r, c) for r in range(3)]) for c in range(4)]
+            axes[orientation] = (column[0], column[1])
+            normal = column[2] / (np.linalg.norm(column[2]) or 1.0)
+            point = point + (float((column[3] - point) @ normal)) * normal       # onto that slice's plane
+        defaults = {"Axial": ((-1, 0, 0), (0, 1, 0)), "Coronal": ((-1, 0, 0), (0, 0, 1)),
+                    "Sagittal": ((0, -1, 0), (0, 0, 1))}      # Slicer's own (the patient's right on the left)
+        for orientation, _ in nr.ORIENTATIONS:
+            axes.setdefault(orientation, tuple(np.array(v, float) for v in defaults[orientation]))
+        return point, axes
+
+    def _reportSliceImages(self, work):
+        """{row: [(orientation, PNG path)]} of the slices drawn from the images themselves (not grabbed from the
+        views): the PET in its colors and window; the scores as shown (colored PET, or the score map over the PET in
+        grey / black; the PET in rainbow colors without scores). Cut to the head (no black around it), at the image's
+        own aspect. The fusion image is not drawn under them."""
+        volume = self.reviewVolume()
+        pet = slicer.util.arrayFromVolume(volume)
+        petMatrix = _ijkToRas(volume)
+        box = rp.contentBox(pet, petMatrix)
+        point, axes = self._reportSlicePoint(box)
+        spacing = max(0.5, min(volume.GetSpacing()) / 2.0)
+        low, high = self.petWindowRange.minimumValue, self.petWindowRange.maximumValue
+        petColors = self._rgbOf(self.petColorCombo.currentText)
+        grey = np.tile(np.linspace(0, 1, 256)[:, None], (1, 3))
+        score = self.scoreNode if self.scoreNode is not None and slicer.mrmlScene.IsNodePresent(self.scoreNode) \
+            else None
+        rgbNode = self._scoreColorsNode() if score is not None else None
+        out = {nr.PET_ROW: [], nr.SCORE_ROW: []}
+        for orientation, _ in nr.ORIENTATIONS:
+            xAxis, yAxis = axes[orientation]
+            points = rp.planePoints(box, point, xAxis, yAxis, spacing)
+            petSlice = rp.sampleVolume(pet, petMatrix, points)
+            images = {nr.PET_ROW: rp.colorize(petSlice, petColors, low, high)}
+            if rgbNode is not None:         # the colored PET (score color x PET brightness), as computed for the views
+                rgb = rp.sampleVolume(slicer.util.arrayFromVolume(rgbNode), _ijkToRas(rgbNode), points)
+                images[nr.SCORE_ROW] = np.clip(rgb / 255.0, 0.0, 1.0)
+            elif score is not None:         # the score map over the PET in grey (or black)
+                values = rp.sampleVolume(slicer.util.arrayFromVolume(score), _ijkToRas(score), points, nearest=True,
+                                         cval=nr.OUTSIDE)
+                background = (rp.colorize(petSlice, grey, low, high)
+                              if self.scoreBackgroundCombo.currentData == "pet" else np.zeros(values.shape + (3,)))
+                rgba, (scoreLow, scoreHigh) = self._scoreColors()
+                images[nr.SCORE_ROW] = rp.overlay(background, values, rgba, scoreLow, scoreHigh,
+                                                  transparent=~np.isfinite(values) | (values <= nr.OUTSIDE / 2.0))
+            else:                           # no scores: the PET in rainbow colors
+                images[nr.SCORE_ROW] = rp.colorize(petSlice, self._rgbOf(NO_SCORE_COLORMAP), low, high)
+            for row, image in images.items():
+                path = os.path.join(work, f"slice_{row or 'pet'}_{orientation}.png")
+                out[row].append((orientation, rp.writePng(image, path)))
+        return out
+
+    def _reportSlices(self, report, work):
+        """The PET and the score slices at the slices' position on screen, drawn from the images, with a colour bar
+        under each row."""
         report.keepWithNext()
         report.heading("Slices")
-        if not widgets:
-            report.paragraph("The slices are not in the layout on screen: pick a layout with the slices to have "
-                             "them in the report.", italic=True)
-            return
-        legends = [node for node in slicer.util.getNodesByClass("vtkMRMLColorLegendDisplayNode")
-                   if node.GetVisibility()]
-        for node in legends:        # the report's own colour bars instead
-            node.SetVisibility(False)
-        images, captions, titles = [], [], []
         try:
-            slicer.app.processEvents()
-            titles_ = {nr.PET_ROW: "PET", nr.SCORE_ROW: self._scoreKind() + " score"}
-            for row in (nr.PET_ROW, nr.SCORE_ROW):
-                rowWidgets = [widget for r, widget in widgets if r == row]
-                if not rowWidgets:
-                    continue
-                titles.append(titles_[row])
-                for (orientation, _), widget in zip(nr.ORIENTATIONS, rowWidgets):
-                    view = widget.sliceView()
-                    view.forceRender()
-                    images.append(ctk.ctkWidgetsUtils.grabWidget(view))
-                    captions.append(orientation)
-        finally:
-            for node in legends:
-                node.SetVisibility(True)
-        aspects = [image.height() / float(image.width()) for image in images if image.width() > 0]
-        aspect = float(np.clip(np.median(aspects), 0.6, 1.3)) if aspects else 1.0
+            rows = self._reportSliceImages(work)
+        except Exception:
+            logging.exception("Static Neuro: the report's slices could not be drawn")
+            report.paragraph("The slices could not be drawn.", italic=True)
+            return
         volume = self.reviewVolume()
-        if titles and titles[0] == "PET":
-            report.imageGrid(images[:3], 3, captions=captions[:3], rowTitles=["PET"], cellAspect=aspect,
-                             maxCellMm=REPORT_SLICE_MM)
-            low, high = self.petWindowRange.minimumValue, self.petWindowRange.maximumValue
-            report.colorbar(self._withAlpha(self._rgbOf(self.petColorCombo.currentText)), low, high,
-                            self._petUnits(volume), "{:.2f}")
-            images, captions, titles = images[3:], captions[3:], titles[1:]
-        if images:
-            scored = self.scoreNode is not None and slicer.mrmlScene.IsNodePresent(self.scoreNode)
-            report.imageGrid(images, 3, captions=captions, rowTitles=[titles[0] if scored else "PET (colors)"],
-                             cellAspect=aspect,
-                             maxCellMm=REPORT_SLICE_MM)
-            if scored:
-                rgba, (low, high) = self._scoreColors()
-                report.colorbar(rgba, low, high, self._scoreKind())
+        low, high = self.petWindowRange.minimumValue, self.petWindowRange.maximumValue
+        scored = self.scoreNode is not None and slicer.mrmlScene.IsNodePresent(self.scoreNode)
+        for row, title in ((nr.PET_ROW, "PET"), (nr.SCORE_ROW, f"{self._scoreKind()} score" if scored
+                                                 else "PET (colors)")):
+            images = [qt.QImage(path) for _, path in rows[row]]
+            report.imageRow(images, captions=[o for o, _ in rows[row]], rowTitle=title, maxHeightMm=REPORT_SLICE_MM)
+            if row == nr.PET_ROW:
+                report.colorbar(self._withAlpha(self._rgbOf(self.petColorCombo.currentText)), low, high,
+                                self._petUnits(volume), "{:.2f}")
+            elif scored:
+                rgba, (scoreLow, scoreHigh) = self._scoreColors()
+                report.colorbar(rgba, scoreLow, scoreHigh, self._scoreKind())
             else:
-                low, high = self.petWindowRange.minimumValue, self.petWindowRange.maximumValue
                 report.colorbar(self._withAlpha(self._rgbOf(NO_SCORE_COLORMAP)), low, high, self._petUnits(volume),
                                 "{:.2f}")
 
@@ -379,7 +418,7 @@ class ReportMixin:
             report.heading("Patient and scan")
             report.keyValues(rp.infoRows(patient, study, scan, comparison))
             report.paragraph(rp.DISCLAIMER, size=9, bold=True, color=rp.DISCLAIMER_COLOR)     # first page, red
-            self._reportSlices(report)
+            self._reportSlices(report, work)
             self._reportSsp(report, work)
             self._reportTable(report)
             comment = self.reportCommentEdit.toPlainText().strip()
