@@ -7,8 +7,9 @@
     neuroreview Static Neuro Review: voxel z / Crawford-Howell t maps in a mask with an SD floor, regional normal
                 statistics (database, on the fly with a cache, approximate), score colours, the review layout
                 (numpy only)
-    neuroreport the PDF report of a review: scan values from DICOM (uptake time, activity), its rows, the 3D-SSP drawn
-                off screen (VTK) and the A4 PDF (Qt: QPdfWriter / QPainter)
+    neuroreport the reports (Static review, Dynamic Modeling / Compare): scan values from DICOM, their rows, slices
+                and 3D-SSP drawn off screen, TAC plots, the A4 pages (Qt: QPdfWriter / QPainter, or PNG pages) and
+                DICOM secondary capture images
     ssp         3D-SSP (Minoshima): projection along the inward surface normals, vertex scores, the normals'
                 projections (.npz), surface colours (numpy + scipy)
     staticneuro Static Neuro PET/SPECT helpers: what a static brain image is (PET / SPECT, units, nuclide, tracer

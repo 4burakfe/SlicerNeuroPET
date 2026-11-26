@@ -182,7 +182,7 @@ def formatPersonName(text):
 
 
 # --- the report's content -----------------------------------------------------------------------------------
-def infoRows(patient, study, scan, comparison):
+def infoRows(patient, study, scan, comparison, extra=(), leaveOut=()):
     """The rows (label, value) of the report's first table, in pairs of columns (left then right):
 
         patient     {"name", "id", "birthDate" (date), "age" (years), "sex", "weight" (kg)}
@@ -190,6 +190,7 @@ def infoRows(patient, study, scan, comparison):
         scan        {"modality", "radionuclide", "radiopharmaceutical", "scanner", "image"}
         comparison  {"database", "normals", "reference", "score", "smoothing" (mm), "regions", "normalization",
                      "units"}
+        extra       more rows (label, value) at the end; leaveOut: labels of rows not shown
     Values not known are NOT_KNOWN."""
     patient, study, scan, comparison = (d or {} for d in (patient, study, scan, comparison))
     age = patient.get("age")
@@ -221,8 +222,8 @@ def infoRows(patient, study, scan, comparison):
         ("Regions", formatValue(comparison.get("regions"))),
         ("Normalization", formatValue(comparison.get("normalization"))),
         ("Image", formatValue(scan.get("image"))),
-    ]
-    return rows
+    ] + [(label, formatValue(value)) for label, value in extra]
+    return [row for row in rows if row[0] not in leaveOut]
 
 
 def _naturalKey(text):
@@ -272,6 +273,237 @@ def colorbarTicks(low, high, count=5):
     if low < 0 < high and not any(abs(t) < 1e-9 for t in ticks):
         ticks = sorted(ticks + [0.0])
     return ticks
+
+
+# --- dynamic series --------------------------------------------------------------------------------------
+def _seconds(value):
+    value = float(value)
+    if abs(value - round(value)) < 0.05:
+        return f"{int(round(value))} s" if value < 120 or value % 60 else f"{int(round(value / 60))} min"
+    return f"{value:.1f} s"
+
+
+def frameSchemeText(durationsS):
+    """'6 x 30 s, 4 x 1 min, 5 x 5 min': the frame durations (s) grouped where they repeat, in order."""
+    groups = []
+    for duration in durationsS:
+        duration = float(duration)
+        if groups and abs(groups[-1][1] - duration) < 0.5:
+            groups[-1][0] += 1
+        else:
+            groups.append([1, duration])
+    return ", ".join(f"{count} \u00d7 {_seconds(duration)}" for count, duration in groups)
+
+
+def frameCaption(number, startMin, endMin):
+    """'3: 1-1.5 min': a frame's number and its time after time zero."""
+    return f"{number}: {startMin:.3g}\u2013{endMin:.3g} min"
+
+
+def niceTicks(low, high, count=6):
+    """Round tick values covering low..high (about count of them)."""
+    if not (math.isfinite(low) and math.isfinite(high)) or high <= low:
+        return [low]
+    raw = (high - low) / max(1, count - 1)
+    magnitude = 10 ** math.floor(math.log10(raw))
+    step = next(m * magnitude for m in (1, 2, 2.5, 5, 10) if m * magnitude >= raw)
+    first = math.floor(low / step) * step
+    ticks, value = [], first
+    while value <= high + step * 1e-6:
+        if value >= low - step * 1e-6:
+            ticks.append(round(value, 10))
+        value += step
+    return ticks
+
+
+def tacPlotImage(curves, units="", width=2000, height=1050, title="", tStar=None, window=None, legend=True):
+    """The time-activity curves as a QImage on white, as the Modeling step draws them (tacplot): the curves with
+    emphasis (the target, the reference) as lines with points and their fit dashed (darker) on top, the others faint
+    behind them; the value axis fits the curves with emphasis (the others may go out of the plot, as in the module).
+
+        curves  [{"name", "color" ('#rrggbb'), "times" (min), "values", "emphasis" (bool), "role",
+                  "fitTimes", "fitValues" (optional)}]
+        tStar   a vertical line at t* (min); window: the (start, end) of a ratio's time window (min), shaded."""
+    qt = _qt()
+    image = qt.QImage(int(width), int(height), qt.QImage.Format_RGB32)
+    image.fill(qt.QColor(255, 255, 255))
+    painter = qt.QPainter(image)
+    try:
+        painter.setRenderHint(qt.QPainter.Antialiasing, True)
+        painter.setRenderHint(qt.QPainter.TextAntialiasing, True)
+        unit = height / 1050.0
+        font = qt.QFont("Helvetica")
+        font.setPixelSize(int(26 * unit))
+        painter.setFont(font)
+        left, right, top, bottom = 150 * unit, 40 * unit, (70 if title else 30) * unit, 110 * unit
+        plotW, plotH = width - left - right, height - top - bottom
+
+        def finite(values):
+            values = np.asarray(values, np.float64) if values is not None else np.zeros(0)
+            return values[np.isfinite(values)]
+        times = np.concatenate([finite(c.get("times")) for c in curves] + [finite(c.get("fitTimes")) for c in curves]
+                               + [np.zeros(1)])
+        values = np.concatenate([finite(c.get("values")) for c in curves]
+                                + [finite(c.get("fitValues")) for c in curves] + [np.zeros(1)])
+        strong = [c for c in curves if c.get("emphasis")] or curves
+        topValues = np.concatenate([finite(c.get("values")) for c in strong]
+                                   + [finite(c.get("fitValues")) for c in strong] + [np.zeros(1)])
+        xMax = float(times.max()) if times.size else 1.0
+        yMax = float(topValues.max()) if topValues.size else 1.0
+        yMin = min(0.0, float(values.min())) if values.size else 0.0
+        xMax = xMax if xMax > 0 else 1.0
+        yMax = yMax if yMax > yMin else yMin + 1.0
+        xTicks, yTicks = niceTicks(0.0, xMax), niceTicks(yMin, yMax * 1.05)
+        for ticks, limit in ((xTicks, xMax), (yTicks, yMax * 1.05)):       # the axes end on a tick
+            step = ticks[1] - ticks[0] if len(ticks) > 1 else 1.0
+            while ticks[-1] < limit - 1e-9:
+                ticks.append(round(ticks[-1] + step, 10))
+        xMax, yMax = max(xMax, xTicks[-1]), max(yMax, yTicks[-1])
+
+        def px(t):
+            return left + plotW * t / xMax
+
+        def py(v):
+            return top + plotH * (1.0 - (v - yMin) / (yMax - yMin))
+
+        if window:
+            painter.fillRect(qt.QRectF(px(window[0]), top, px(window[1]) - px(window[0]), plotH),
+                             qt.QColor(255, 236, 179))
+        grid = qt.QPen(qt.QColor(225, 225, 225))
+        grid.setWidthF(2 * unit)
+        axis = qt.QPen(qt.QColor(60, 60, 60))
+        axis.setWidthF(3 * unit)
+        for t in xTicks:
+            painter.setPen(grid)
+            painter.drawLine(qt.QPointF(px(t), top), qt.QPointF(px(t), top + plotH))
+            painter.setPen(axis)
+            painter.drawText(qt.QRectF(px(t) - 80 * unit, top + plotH + 8 * unit, 160 * unit, 34 * unit),
+                             int(qt.Qt.AlignHCenter | qt.Qt.AlignTop), f"{t:g}")
+        for v in yTicks:
+            painter.setPen(grid)
+            painter.drawLine(qt.QPointF(left, py(v)), qt.QPointF(left + plotW, py(v)))
+            painter.setPen(axis)
+            painter.drawText(qt.QRectF(0, py(v) - 17 * unit, left - 14 * unit, 34 * unit),
+                             int(qt.Qt.AlignRight | qt.Qt.AlignVCenter), f"{v:g}")
+        painter.setPen(axis)
+        painter.drawRect(qt.QRectF(left, top, plotW, plotH))
+        painter.drawText(qt.QRectF(left, height - 52 * unit, plotW, 40 * unit), int(qt.Qt.AlignCenter),
+                         "Time from time zero (min)")
+        painter.save()
+        painter.translate(30 * unit, top + plotH / 2.0)
+        painter.rotate(-90)
+        painter.drawText(qt.QRectF(-plotH / 2.0, -20 * unit, plotH, 40 * unit), int(qt.Qt.AlignCenter),
+                         f"Activity ({units})" if units else "Activity")
+        painter.restore()
+        if title:
+            bold = qt.QFont(font)
+            bold.setBold(True)
+            bold.setPixelSize(int(30 * unit))
+            painter.setFont(bold)
+            painter.drawText(qt.QRectF(left, 10 * unit, plotW, 50 * unit), int(qt.Qt.AlignLeft | qt.Qt.AlignVCenter),
+                             title)
+            painter.setFont(font)
+        if tStar is not None and math.isfinite(tStar):
+            dashed = qt.QPen(qt.QColor(120, 120, 120))
+            dashed.setWidthF(3 * unit)
+            dashed.setStyle(qt.Qt.DashLine)
+            painter.setPen(dashed)
+            painter.drawLine(qt.QPointF(px(tStar), top), qt.QPointF(px(tStar), top + plotH))
+            painter.drawText(qt.QRectF(px(tStar) + 6 * unit, top + 4 * unit, 200 * unit, 34 * unit),
+                             int(qt.Qt.AlignLeft | qt.Qt.AlignTop), "t*")
+        painter.setClipRect(qt.QRectF(left, top, plotW, plotH))
+
+        def finiteOrNan(values):
+            return np.asarray(values if values is not None else [], np.float64)
+
+        def polyline(ts, vs, pen):
+            ts, vs = np.asarray(ts, np.float64), np.asarray(vs, np.float64)
+            ok = np.isfinite(ts) & np.isfinite(vs)
+            path = qt.QPainterPath()
+            started = False
+            for t, v, good in zip(ts, vs, ok):
+                if not good:
+                    started = False
+                    continue
+                if started:
+                    path.lineTo(px(t), py(v))
+                else:
+                    path.moveTo(px(t), py(v))
+                    started = True
+            painter.strokePath(path, pen)
+
+        ordered = [c for c in curves if not c.get("emphasis")] + [c for c in curves if c.get("emphasis")]
+        for curve in ordered:
+            color = qt.QColor(curve.get("color") or "#808080")
+            strong = bool(curve.get("emphasis"))
+            if not strong:
+                color.setAlphaF(0.2)
+            pen = qt.QPen(color)
+            pen.setWidthF((4.5 if strong else 2.0) * unit)
+            polyline(curve.get("times"), curve.get("values"), pen)
+            painter.setPen(qt.QPen(qt.Qt.NoPen))
+            painter.setBrush(qt.QBrush(color))
+            radius = (6.5 if strong else 3.5) * unit
+            for t, v in zip(finiteOrNan(curve.get("times")), finiteOrNan(curve.get("values"))):
+                if math.isfinite(t) and math.isfinite(v):
+                    painter.drawEllipse(qt.QPointF(px(t), py(v)), radius, radius)
+            painter.setBrush(qt.QBrush())
+            if curve.get("fitTimes") is not None and curve.get("fitValues") is not None:
+                fitPen = qt.QPen(color.darker(150) if strong else color)
+                fitPen.setWidthF((4.0 if strong else 2.0) * unit)
+                fitPen.setStyle(qt.Qt.DashLine)
+                polyline(curve["fitTimes"], curve["fitValues"], fitPen)
+        painter.setClipping(False)
+        if legend:
+            entries = [c for c in curves if c.get("emphasis")]
+            faint = len(curves) - len(entries)
+            y = top + 14 * unit
+            x = left + plotW - 20 * unit
+            texts = []
+            for c in entries:
+                color = qt.QColor(c.get("color") or "#808080")
+                role = c.get("role") or ""
+                name = c.get("name", "")
+                texts.append((name + (f" ({role})" if role and f"({role})" not in name.lower() else ""), color, False))
+                if c.get("fitTimes") is not None and c.get("fitValues") is not None:
+                    texts.append(("fit", color.darker(150), True))
+            if faint:
+                other = qt.QColor(128, 128, 128)
+                other.setAlphaF(0.4)
+                texts.append((f"Other regions ({faint})", other, False))
+            if tStar is not None and math.isfinite(tStar):
+                texts.append(("t*", qt.QColor(120, 120, 120), True))
+            metrics = painter.fontMetrics()
+            boxW = max([metrics.width(t) for t, _, _ in texts] + [0]) + 90 * unit
+            if texts:
+                painter.fillRect(qt.QRectF(x - boxW, y - 6 * unit, boxW, len(texts) * 40 * unit + 12 * unit),
+                                 qt.QColor(255, 255, 255, 230))
+            for text, color, dashed in texts:
+                pen = qt.QPen(color)
+                pen.setWidthF(5 * unit)
+                if dashed:
+                    pen.setStyle(qt.Qt.DashLine)
+                painter.setPen(pen)
+                painter.drawLine(qt.QPointF(x - boxW + 12 * unit, y + 20 * unit),
+                                 qt.QPointF(x - boxW + 60 * unit, y + 20 * unit))
+                painter.setPen(qt.QColor(30, 30, 30))
+                painter.drawText(qt.QRectF(x - boxW + 72 * unit, y, boxW - 80 * unit, 40 * unit),
+                                 int(qt.Qt.AlignLeft | qt.Qt.AlignVCenter), text)
+                y += 40 * unit
+    finally:
+        painter.end()
+    return image
+
+
+def gridBox(shape, ijkToRas):
+    """(RAS minimum, RAS maximum) of a whole grid (k, j, i): the slices drawn uncut."""
+    k, j, i = (n - 1 for n in shape[:3])
+    corners = np.array([[a, b, c, 1.0] for a in (0, i) for b in (0, j) for c in (0, k)], np.float64)
+    ras = (np.asarray(ijkToRas, np.float64) @ corners.T).T[:, :3]
+    return ras.min(axis=0), ras.max(axis=0)
+
+
+INVERTED_GREY = np.tile(np.linspace(1.0, 0.0, 256)[:, None], (1, 3))     # white (0) to black (the window's top)
 
 
 # --- slices from the images (not from the views) ----------------------------------------------------------

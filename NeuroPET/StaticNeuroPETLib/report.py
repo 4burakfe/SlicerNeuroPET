@@ -60,6 +60,10 @@ class ReportMixin:
             "3D-SSP in 16 views on a white background (the scores, then those below the threshold); the region "
             "table sorted by name.")
         form.addRow(self.reportButton)
+        self.reportDicomButton = _button("Save to the DICOM database")
+        self.reportDicomButton.toolTip = ("The report's pages as images (secondary capture), straight into Slicer's "
+                                          "DICOM database, in the patient's study (no file to pick)")
+        form.addRow(self.reportDicomButton)
         self.reportLabel = qt.QLabel()
         self.reportLabel.wordWrap = True
         self.reportLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
@@ -68,6 +72,7 @@ class ReportMixin:
         saved = self._reportSettings()
         self.reportOpenCheck.checked = bool(saved.get("open", True))
         self.reportButton.connect("clicked()", self.onSaveReport)
+        self.reportDicomButton.connect("clicked()", self.onSaveDicomReport)
 
     @staticmethod
     def _reportSettings():
@@ -76,9 +81,10 @@ class ReportMixin:
         except ValueError:
             return {}
 
-    def _saveReportSettings(self, folder):
+    def _saveReportSettings(self, folder, openCheck=None):
         values = self._reportSettings()
-        values.update(open=bool(self.reportOpenCheck.checked), folder=folder)
+        check = openCheck if openCheck is not None else self.reportOpenCheck
+        values.update(open=bool(check.checked), folder=folder)
         qt.QSettings().setValue(SETTINGS_REPORT, json.dumps(values))
 
     # --- what the report says ------------------------------------------------------------------------------
@@ -114,9 +120,22 @@ class ReportMixin:
             logging.warning("Static Neuro: could not read the DICOM values of the report", exc_info=True)
         return values
 
+    REPORT_IMAGE_TITLE = "PET"      # the title of the slices' first row
+
+    def _reportSourceNode(self):
+        """The image the report is about: its DICOM values, its study (the DICOM report filed in it)."""
+        return self.reviewVolume()
+
+    def _reportInfoRows(self, patient, study, scan, comparison):
+        return rp.infoRows(patient, study, scan, comparison)
+
     def _reportContent(self):
         """(patient, study, scan, comparison, dicom values) of the report (neuroreport.infoRows)."""
-        result = self.reviewResult or {}
+        patient, study, scan, dicom = self._reportSubject()
+        return patient, study, scan, self._reportComparison(), dicom
+
+    def _reportSubject(self):
+        """(patient, study, scan, dicom values) of the report's image."""
         volume = self.reviewVolume()
         attributes = self.logic.attributes(volume)
         dicom = self._reportDicomValues(volume)
@@ -157,6 +176,13 @@ class ReportMixin:
         scan = {"modality": info.get("modality") or dicom.get("Modality", ""), "radionuclide": nuclide,
                 "radiopharmaceutical": tracer, "scanner": scanner,
                 "image": volume.GetName() if volume is not None else ""}
+        return patient, study, scan, dicom
+
+    def _reportComparison(self):
+        """The comparison's rows of the report (neuroreport.infoRows)."""
+        result = self.reviewResult or {}
+        volume = self.reviewVolume()
+        attributes = self.logic.attributes(volume) if volume is not None else {}
         header = result.get("header")
         comparison = {"score": dict(nr.SCORES).get(self._scoreKind(), self._scoreKind()) if header else "",
                       "units": self._patientUnits(), "smoothing": result.get("fwhm") if header else None}
@@ -180,7 +206,7 @@ class ReportMixin:
         if method or template:
             comparison["normalization"] = (NORMALIZATION_TITLES.get(method, method or "")
                                            + (f" ({template})" if template else "")).strip()
-        return patient, study, scan, comparison, dicom
+        return comparison
 
     # --- the images ----------------------------------------------------------------------------------------
     @staticmethod
@@ -269,8 +295,9 @@ class ReportMixin:
         volume = self.reviewVolume()
         low, high = self.petWindowRange.minimumValue, self.petWindowRange.maximumValue
         scored = self.scoreNode is not None and slicer.mrmlScene.IsNodePresent(self.scoreNode)
-        for row, title in ((nr.PET_ROW, "PET"), (nr.SCORE_ROW, f"{self._scoreKind()} score" if scored
-                                                 else "PET (colors)")):
+        for row, title in ((nr.PET_ROW, self.REPORT_IMAGE_TITLE),
+                           (nr.SCORE_ROW, f"{self._scoreKind()} score" if scored
+                            else f"{self.REPORT_IMAGE_TITLE} (colors)")):
             images = [qt.QImage(path) for _, path in rows[row]]
             report.imageRow(images, captions=[o for o, _ in rows[row]], rowTitle=title, maxHeightMm=REPORT_SLICE_MM)
             if row == nr.PET_ROW:
@@ -401,7 +428,7 @@ class ReportMixin:
         (their paths returned)."""
         report = rp.PdfReport(path, self.REPORT_TITLE, REPORT_BANNER_PATH)
         report.heading("Patient and scan")
-        report.keyValues(rp.infoRows(patient, study, scan, comparison))
+        report.keyValues(self._reportInfoRows(patient, study, scan, comparison))
         report.paragraph(rp.DISCLAIMER, size=9, bold=True, color=rp.DISCLAIMER_COLOR)     # first page, red
         self._reportSlices(report, work)
         self._reportSsp(report, work)
@@ -457,10 +484,10 @@ class ReportMixin:
                 raise IOError("The DICOM database did not keep a copy of the saved images.")
 
     def _dicomTarget(self):
-        """(volume, patient, study, scan, comparison, dicom, studyUID, sourceUIDs) of the review's DICOM outputs."""
-        volume = self.reviewVolume()
+        """(volume, patient, study, scan, comparison, dicom, studyUID, sourceUIDs) of the report's DICOM outputs."""
+        volume = self._reportSourceNode()
         patient, study, scan, comparison, dicom = self._reportContent()
-        sourceUIDs = (volume.GetAttribute("DICOM.instanceUIDs") or "").split()
+        sourceUIDs = (volume.GetAttribute("DICOM.instanceUIDs") or "").split() if volume is not None else []
         studyUID = self._reportStudyUID(volume, dicom, sourceUIDs, patient)
         return volume, patient, study, scan, comparison, dicom, studyUID, sourceUIDs
 
@@ -468,49 +495,65 @@ class ReportMixin:
         if asDicom:
             self.onSaveDicomReport()
             return
-        title = "PDF report"
         if self.reviewResult is None:
-            slicer.util.warningDisplay("Compare the patient first (Review step).", windowTitle=title)
+            slicer.util.warningDisplay("Compare the patient first (Review step).", windowTitle="PDF report")
             return
         patient, study, scan, comparison, dicom = self._reportContent()
+
+        def render(path, work, imageFolder=None):
+            return self._renderReport(path, work, patient, study, scan, comparison, imageFolder=imageFolder)
+        self._savePdfReport("PDF report", render, patient, study, self.REPORT_FILE_SUFFIX, self.reportLabel,
+                            self.reportOpenCheck)
+
+    def onSaveDicomReport(self):
+        """The report's pages as images (Secondary Capture), straight into the Slicer DICOM database (no file to
+        pick): a new series in the PET's study."""
+        if self.reviewResult is None:
+            slicer.util.warningDisplay("Compare the patient first (Review step).", windowTitle="DICOM report")
+            return
+
+        def render(path, work, patient, study, scan, comparison, imageFolder=None):
+            return self._renderReport(path, work, patient, study, scan, comparison, imageFolder=imageFolder)
+        self._saveDicomReport("DICOM report", render, self.REPORT_TITLE, self.reportLabel)
+
+    def _savePdfReport(self, title, render, patient, study, suffix, label, openCheck):
+        """A PDF report written where the user picks (the last folder remembered); render(path, work folder) draws
+        it and returns its page count."""
         folder = self._reportSettings().get("folder") or os.path.expanduser("~")
-        name = rp.reportFileName(patient.get("name"), study.get("date"), self.REPORT_FILE_SUFFIX)
+        name = rp.reportFileName(patient.get("name"), study.get("date"), suffix)
         name = os.path.splitext(name)[0] + ".pdf"
         path = qt.QFileDialog.getSaveFileName(slicer.util.mainWindow(), "Save the " + title,
                                               os.path.join(folder, name), "PDF (*.pdf)")
         if not path:
-            return
+            return None
         path = str(path)
         if not path.lower().endswith(".pdf"):
             path += ".pdf"
         folder = os.path.dirname(path)
-        self._saveReportSettings(folder)
+        self._saveReportSettings(folder, openCheck)
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
             # Stage the final file on the destination filesystem so a failed export preserves an existing report.
             with tempfile.TemporaryDirectory(dir=folder) as staging, tempfile.TemporaryDirectory() as work:
                 pdfPath = os.path.join(staging, "report.pdf")
-                pages = self._renderReport(pdfPath, work, patient, study, scan, comparison)
+                pages = render(pdfPath, work)
                 os.replace(pdfPath, path)
         except Exception as error:
-            logging.exception("Static Neuro: could not write the PDF report")
+            logging.exception("Neuro: could not write the PDF report")
             slicer.util.errorDisplay(f"Could not write the {title}:\n{error}", windowTitle=title)
-            return
+            return None
         finally:
             qt.QApplication.restoreOverrideCursor()
         message = f"Saved: {path} ({pages} page{'s' if pages != 1 else ''})"
-        self.reportLabel.text = message
+        label.text = message
         slicer.util.showStatusMessage(message, 5000)
-        if self.reportOpenCheck.checked:
+        if openCheck is None or openCheck.checked:
             qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(path))
+        return path
 
-    def onSaveDicomReport(self):
-        """The report's pages as images (Secondary Capture), straight into the Slicer DICOM database (no file to
-        pick): a new series in the PET's study."""
-        title = "DICOM report"
-        if self.reviewResult is None:
-            slicer.util.warningDisplay("Compare the patient first (Review step).", windowTitle=title)
-            return
+    def _saveDicomReport(self, title, render, reportTitle, label):
+        """A report's pages as secondary capture images in the image's study, into the DICOM database;
+        render(path, work, patient, study, scan, comparison, imageFolder) draws the pages as PNG files."""
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
             self._dicomDatabase()
@@ -518,21 +561,22 @@ class ReportMixin:
             with tempfile.TemporaryDirectory() as work:
                 pageFolder = os.path.join(work, "pages")
                 os.makedirs(pageFolder)
-                images = self._renderReport(None, work, patient, study, scan, comparison, imageFolder=pageFolder)
+                images = render(None, work, patient, study, scan, comparison, imageFolder=pageFolder)
                 paths = [os.path.join(work, f"page{number}.dcm") for number in range(1, len(images) + 1)]
-                uids = rp.writeDicomImages(paths, images, self.REPORT_TITLE, patient, dicom, studyUID, sourceUIDs)
+                uids = rp.writeDicomImages(paths, images, reportTitle, patient, dicom, studyUID, sourceUIDs)
                 self._importDicom(paths, uids)
         except Exception as error:
-            logging.exception("Static Neuro: could not save the DICOM report")
+            logging.exception("Neuro: could not save the DICOM report")
             slicer.util.errorDisplay(f"Could not save the {title}:\n{error}", windowTitle=title)
-            return
+            return False
         finally:
             qt.QApplication.restoreOverrideCursor()
         pages = len(uids)
         message = (f"DICOM report ({pages} page{'s' if pages != 1 else ''}) added to the DICOM database "
                    f"(series {rp.REPORT_SERIES[1]}, \"{rp.REPORT_SERIES[0]}\").")
-        self.reportLabel.text = message
+        label.text = message
         slicer.util.showStatusMessage(message, 5000)
+        return True
 
     # --- screenshots ---------------------------------------------------------------------------------------------
     def _screenImages(self):

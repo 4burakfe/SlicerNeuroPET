@@ -43,20 +43,43 @@ class ToolbarMixin:
         else:
             self._patientAction = toolbar.addWidget(self.patientLabel)
         self._patientAction.setVisible(False)
+        self._addReviewTools(toolbar, self._buildReviewRow("Static Neuro review"))
+        toolbar.connect("visibilityChanged(bool)", lambda visible: self._updateReviewTools())
+        return toolbar
+
+    def _buildReviewRow(self, title):
+        """The review's own toolbar row under the workflow row (shown on the review step only). A row left by a
+        developer reload is taken away first."""
         window = slicer.util.mainWindow()
-        self.reviewToolbar = qt.QToolBar("Static Neuro review", window)
-        self.reviewToolbar.objectName = self.TOOLBAR_NAME + "Review"
+        name = self.TOOLBAR_NAME + "Review"
+        for old in [w for w in window.findChildren(qt.QToolBar) if w.objectName == name]:
+            try:
+                window.removeToolBarBreak(old)
+                window.removeToolBar(old)
+                old.hide()
+                old.objectName = name + "Old"
+            except Exception:
+                pass
+        self.reviewToolbar = qt.QToolBar(title, window)
+        self.reviewToolbar.objectName = name
         self.reviewToolbar.setIconSize(qt.QSize(24, 24))
         self.reviewToolbar.setToolButtonStyle(qt.Qt.ToolButtonTextBesideIcon)
         self.reviewToolbar.hide()
         window.addToolBarBreak()
         window.addToolBar(self.reviewToolbar)
-        self._addReviewTools(toolbar, self.reviewToolbar)
-        toolbar.connect("visibilityChanged(bool)", lambda visible: self._updateReviewTools())
-        return toolbar
+        return self.reviewToolbar
+
+    def _removeReviewRow(self):
+        row = getattr(self, "reviewToolbar", None)
+        if row is not None:
+            window = slicer.util.mainWindow()
+            window.removeToolBarBreak(row)
+            window.removeToolBar(row)
+            row.deleteLater()
+            self.reviewToolbar = None
 
     def _addReviewTools(self, toolbar, reviewToolbar=None):
-        """Static review has its own row. Dynamic Compare uses its workflow row."""
+        """The review tools on their own row (reviewToolbar), the Panel button on the workflow row."""
         def action(row, icon, label, tip):
             item = qt.QAction(label, row)
             item.toolTip = tip

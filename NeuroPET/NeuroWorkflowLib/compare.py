@@ -86,6 +86,8 @@ class ComparePageMixin:
         form.addRow(self.mapsLabel)
         layout.addWidget(box)
         self._buildReviewBoxes(layout)
+        if hasattr(self, "_buildReportBox"):
+            self._buildReportBox(layout)        # the PDF / DICOM report of the comparison
         self._buildDynamicAddBox(layout)
         layout.addStretch(1)
         self.compareMaps = {}           # {map name: volume node} of the set compared

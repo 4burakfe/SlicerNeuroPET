@@ -14,6 +14,7 @@ to it without importing each other. DynamicNeuroPET.py re-exports every name of 
 (from DynamicNeuroPET import ...) keep working.
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -114,9 +115,44 @@ NORMALIZATION_BRAINSFIT = {"numberOfIterations": 1500, "histogramBins": 50,
 NORMALIZATION_ENGINE = reg.ENGINE_ITERATIVE
 NORMALIZATION_ITERATIVE_LINEAR = "Affine"
 NORMALIZATION_ITERATIVE_DEFORMABLE = False
-NORMALIZATION_ITERATIVE_SPACING_MM = 1.0
+NORMALIZATION_ITERATIVE_SPACING_MM = 2.0   # (user 2026-11-27; was 1 mm)
 NORMALIZATION_ITERATIVE_QUALITY = "Thorough"
 NORMALIZATION_ITERATIVE_GRID_MM = 30.0     # iterative engine: last control-point spacing (brain to template)
+# The deformable passes on by default in the Dynamic Neuro module (user 2026-11-25): an affine is one transform for
+# the whole brain, so in an atrophic brain (large ventricles) the caudate slid into the ventricles. The pass is kept
+# only when it improves the match and does not fold the image. The widget's NORM_DEFORMABLE sets it per module (Static
+# Neuro off: its FDG databases were normalized with the affine only).
+# (user 2026-11-27: off again by default in both modules, affine only; the B-spline stays a choice)
+NORMALIZATION_DYNAMIC_DEFORMABLE = False
+# One B-spline pass at the picked grid, straight on the final resolution (user 2026-11-26): after the affine the
+# coarser passes (4x and 2x the grid) and the coarse first level added little and took long (PET4D's own default is 3
+# passes, the first from a coarse level)
+NORMALIZATION_ITERATIVE_PASSES = 1
+NORMALIZATION_DEFORMABLE_COARSE = False
+# the one pass's L-BFGS-B: at most 100 iterations (PET4D's default 25 per pass stopped it early) and 20 corrections
+# (PET4D's default 5) (user 2026-11-26)
+NORMALIZATION_DEFORMABLE_ITERATIONS = 100
+NORMALIZATION_DEFORMABLE_CORRECTIONS = 20
+# the pass on images of 8, then 4, then 2 mm (user 2026-11-27: on the final resolution only the metric fell too
+# slowly); it ends at 2 mm even when the affine ran at 1 mm. Levels finer than the final resolution are dropped.
+NORMALIZATION_DEFORMABLE_LEVELS_MM = (8.0, 4.0, 2.0)
+# Quality as a fraction of each level's voxels (Fast 1 %, Standard 3 %, Thorough 10 %, at least 5000 samples; PET4D's
+# sitkreg.QUALITY_PERCENT) instead of a fixed number of samples per level (user 2026-11-27)
+NORMALIZATION_SAMPLING_MODE = "percent"
+# the control points scaled with the images of the deformable levels (user 2026-11-27): the picked grid on the last
+# level, twice / four times it on the coarser ones (e.g. grid 10 mm: 40, 20, 10 mm on 8, 4, 2 mm images)
+NORMALIZATION_DEFORMABLE_GRID_SCALING = True
+NORMALIZATION_CHECKERBOARD = True  # the checkerboard column of the normalization layout shown at start
+NORMALIZATION_CHECKER_MM = 10.0     # its squares (smaller than the registration's 20 mm: the B-spline bends locally)
+NORMALIZATION_FOLD_GUARD = True     # "Prevent folding" at start (bounded control points, folding passes scaled down)
+# Each B-spline control point moves at most this fraction of its grid spacing (with "Prevent folding"). 0.4 is the
+# limit for one B-spline not to fold; the scaled runs (40/20/10 mm) add up, so a lower bound keeps the sum smooth
+# (user 2026-11-27: 0.4 folded and was dropped, no bound bent the whole brain)
+NORMALIZATION_DEFORMABLE_MAX_SHIFT = 0.25
+# While a normalization runs (user 2026-11-26: the B-spline passes took the CPU to 100 % and the PC could not be used):
+# SimpleITK / ITK use all cores but this many, and on Windows Slicer runs at below-normal priority (other programs
+# first; Slicer still gets the idle cores). See gentleCpu().
+NORMALIZATION_FREE_CORES = 2
 # The PET is registered to the skull-stripped template by default (the scalp of the T1 has no PET counterpart);
 # the CT/MR is registered to the whole template.
 NORMALIZATION_BRAIN_MASK = {METHOD_PET: True, METHOD_ANATOMY: False, METHOD_PET_TEMPLATE: True}
@@ -149,6 +185,47 @@ TOOLBAR_OBJECT_NAME = "DynamicNeuroPETWorkflowToolbar"
 ICON_PATH = os.path.join(_MODULE_DIR, "Resources", "Icons", "DynamicNeuroPET.png")
 STATE_DONE, STATE_READY, STATE_WAITING = "done", "ready", "waiting"
 STATE_COLORS = {STATE_DONE: "#2e9e5b", STATE_READY: "#2f7ed8", STATE_WAITING: "#8f969c"}
+
+@contextlib.contextmanager
+def gentleCpu(freeCores=NORMALIZATION_FREE_CORES):
+    """Within the block: SimpleITK's (and ITK's) default thread count all cores but freeCores, and on Windows the
+    Slicer process (and the CLIs it starts, e.g. BRAINSFit) at below-normal priority, so the computer stays usable
+    during a long registration. Both restored after."""
+    restore = []
+    try:
+        import SimpleITK as sitk
+        before = int(sitk.ProcessObject.GetGlobalDefaultNumberOfThreads())
+        cores = os.cpu_count() or 1
+        wanted = max(1, min(before if before > 0 else cores, cores - int(freeCores)))
+        if wanted != before:
+            sitk.ProcessObject.SetGlobalDefaultNumberOfThreads(wanted)
+            restore.append(lambda: sitk.ProcessObject.SetGlobalDefaultNumberOfThreads(before))
+            logging.info(f"Neuro: registration on {wanted} of {cores} cores")
+    except Exception:
+        logging.debug("Neuro: could not limit the SimpleITK threads", exc_info=True)
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            kernel = ctypes.WinDLL("kernel32")     # an own handle: the argtypes below stay local
+            kernel.GetCurrentProcess.restype = ctypes.c_void_p
+            kernel.GetPriorityClass.argtypes = [ctypes.c_void_p]
+            kernel.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+            handle = kernel.GetCurrentProcess()
+            old = int(kernel.GetPriorityClass(handle))
+            belowNormal = 0x4000        # BELOW_NORMAL_PRIORITY_CLASS
+            if old and old != belowNormal and kernel.SetPriorityClass(handle, belowNormal):
+                restore.append(lambda: kernel.SetPriorityClass(handle, old))
+        except Exception:
+            logging.debug("Neuro: could not lower Slicer's priority", exc_info=True)
+    try:
+        yield
+    finally:
+        for undo in reversed(restore):
+            try:
+                undo()
+            except Exception:
+                logging.debug("Neuro: could not restore the CPU settings", exc_info=True)
+
 
 def _vtkMatrix(array):
     return resampling.vtkMatrix(array)
@@ -530,13 +607,22 @@ class NeuroWorkflowLogic(ScriptedLoadableModuleLogic):
         settings["iterativeGridMm"] = NORMALIZATION_ITERATIVE_GRID_MM
         settings["iterativeSpacingMm"] = NORMALIZATION_ITERATIVE_SPACING_MM
         settings["iterativeQuality"] = NORMALIZATION_ITERATIVE_QUALITY
+        settings["iterativePasses"] = NORMALIZATION_ITERATIVE_PASSES
+        settings["iterativeDeformableCoarse"] = NORMALIZATION_DEFORMABLE_COARSE
+        settings["iterativeDeformableIterations"] = NORMALIZATION_DEFORMABLE_ITERATIONS
+        settings["iterativeDeformableCorrections"] = NORMALIZATION_DEFORMABLE_CORRECTIONS
+        settings["iterativeDeformableLevelsMm"] = list(NORMALIZATION_DEFORMABLE_LEVELS_MM)
+        settings["iterativeSampling"] = NORMALIZATION_SAMPLING_MODE
+        settings["iterativeDeformableGridScaling"] = NORMALIZATION_DEFORMABLE_GRID_SCALING
+        settings["iterativeFoldGuard"] = NORMALIZATION_FOLD_GUARD
+        settings["iterativeDeformableMaxShift"] = NORMALIZATION_DEFORMABLE_MAX_SHIFT
         settings["engine"] = NORMALIZATION_ENGINE
         if NORMALIZATION_ENGINE == reg.ENGINE_ITERATIVE:
             settings["steps"] = reg.iterativeSteps(NORMALIZATION_ITERATIVE_LINEAR, NORMALIZATION_ITERATIVE_DEFORMABLE)
         return settings
 
     def normalize(self, sequence, template, method=METHOD_PET, anatomy=None, settings=None, mask=None,
-                  progress=None, ctTemplate=None, ctCorrection=None, petImage=None):
+                  progress=None, ctTemplate=None, ctCorrection=None, petImage=None, onIteration=None):
         """Register the PET reference image (METHOD_PET) or the CT/MR (METHOD_ANATOMY) to the template; the result
         of DynamicPETRegistrationLogic.register() (linear matrix, B-spline node, ...) plus "moving". A CT with a CT
         template (in the MNI space, e.g. scct_unsmooth) is registered to that template instead (CT to CT, both
@@ -579,7 +665,9 @@ class NeuroWorkflowLogic(ScriptedLoadableModuleLogic):
             fixed = self.brainOnly(template, mask) if mask is not None else template
         try:
             registered = ctBrain if ctBrain is not None else moving
-            result = DynamicPETRegistrationLogic().register(fixed, registered, settings, progress)
+            with gentleCpu():
+                result = DynamicPETRegistrationLogic().register(fixed, registered, settings, progress,
+                                                                onIteration=onIteration)
         finally:
             for helper in (fixed if fixed not in (template, ctTemplate) else None, ctBrain):
                 if helper is not None:
@@ -1454,6 +1542,7 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     BANNER_STEPS = (STEP_DATA,)     # the Mergen banner at the top of the panel on these steps
     NORM_METHODS = METHODS
     NORM_IMAGE_CHOICE = True        # the PET image registered can be picked (Dynamic: the summed image by default)
+    NORM_DEFORMABLE = NORMALIZATION_DYNAMIC_DEFORMABLE   # iterative engine: deformable passes on at start
     LOAD_REGIONS_TEXT = "Load regions and go to modeling"
     NORM_HARDEN_GRIDS = NORMALIZATION_GRIDS         # the first one the default of the Harden dialog
     # Overwrite first (the default): a second copy of a dynamic series takes a lot of memory
@@ -2266,9 +2355,34 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         iterativeForm.setContentsMargins(0, 0, 0, 0)
         self.normIterative = iterativeOptions(iterativeForm, gridMm=NORMALIZATION_ITERATIVE_GRID_MM,
                                               linear=NORMALIZATION_ITERATIVE_LINEAR,
-                                              deformable=NORMALIZATION_ITERATIVE_DEFORMABLE,
+                                              deformable=self.NORM_DEFORMABLE,
                                               spacingMm=NORMALIZATION_ITERATIVE_SPACING_MM,
-                                              quality=NORMALIZATION_ITERATIVE_QUALITY)
+                                              quality=NORMALIZATION_ITERATIVE_QUALITY, plainTitles=True,
+                                              percentQuality=NORMALIZATION_SAMPLING_MODE == "percent")
+        # (user 2026-11-27) the B-spline's folding guard can be turned off to see the unconstrained result
+        self.normFoldCheck = qt.QCheckBox("Prevent folding")
+        self.normFoldCheck.checked = NORMALIZATION_FOLD_GUARD
+        self.normFoldCheck.toolTip = (
+            "On: each control point moves at most the fraction of the grid spacing below, and a pass that still "
+            "folds inside the brain is scaled down (1/2, 1/4) before it is dropped. Off: no bound and no pass "
+            "dropped (as BRAINSFit); the result may fold, a warning is shown.")
+        iterativeForm.addRow(self.normFoldCheck)
+        self.normMaxShiftSpin = qt.QDoubleSpinBox()
+        self.normMaxShiftSpin.setRange(0.05, 1.0)
+        self.normMaxShiftSpin.setDecimals(2)
+        self.normMaxShiftSpin.setSingleStep(0.05)
+        self.normMaxShiftSpin.setSuffix(" \u00d7 grid")
+        self.normMaxShiftSpin.value = NORMALIZATION_DEFORMABLE_MAX_SHIFT
+        self.normMaxShiftSpin.toolTip = (
+            "Most shift of each B-spline control point, as a fraction of its spacing (e.g. 0.25 of a 20 mm grid: 5 "
+            "mm). Lower: a smoother, gentler deformation; up to 0.4 a single B-spline cannot fold, above it may (a folding "
+            "pass is then scaled down or dropped).")
+        self.normMaxShiftSpin.enabled = self.normFoldCheck.checked
+        self.normFoldCheck.connect("toggled(bool)", lambda on: setattr(self.normMaxShiftSpin, "enabled", on))
+        iterativeForm.addRow("Max control point shift:", self.normMaxShiftSpin)
+        self.normIterative["deformable"].toolTip = (
+            "One B-spline pass after the linear stage, control points at the grid below, run straight on the final "
+            "resolution; kept only when it improves the match and does not fold the image")
         self.normStepCombos = []
         for index, default in enumerate(NORMALIZATION_STEPS):
             combo = qt.QComboBox()
@@ -2410,8 +2524,20 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.normOpacity.singleStep, self.normOpacity.decimals = 0.05, 2
         self.normOpacity.value = 0.5
         view.addRow("Fusion opacity:", self.normOpacity)
+        # (user 2026-11-27) the checkerboard column on the left on by default: a checkerboard on the PET grid moved
+        # by the same transform (linear + B-spline), so the deformation shows as bent squares
         self.normCheckerCheck = qt.QCheckBox("Checkerboard column")
+        self.normCheckerCheck.checked = NORMALIZATION_CHECKERBOARD
+        self.normCheckerCheck.toolTip = ("A checkerboard made on the PET grid and moved by the same transform as the "
+                                         "PET, in an extra column on the left: the deformation bends its squares")
         view.addRow(self.normCheckerCheck)
+        self.normCheckerSizeSpin = qt.QDoubleSpinBox()
+        self.normCheckerSizeSpin.setRange(2.0, 200.0)
+        self.normCheckerSizeSpin.setDecimals(0)
+        self.normCheckerSizeSpin.setSingleStep(5.0)
+        self.normCheckerSizeSpin.setSuffix(" mm")
+        self.normCheckerSizeSpin.value = NORMALIZATION_CHECKER_MM
+        view.addRow("Checkerboard squares:", self.normCheckerSizeSpin)
         layout.addWidget(viewBox)
         layout.addStretch(1)
 
@@ -2434,6 +2560,8 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.normOpacity.connect("valueChanged(double)", lambda v: self.normSession and
                                  self.normSession.setFusionOpacity(v))
         self.normCheckerCheck.connect("toggled(bool)", self._onNormCheckerToggled)
+        self.normCheckerSizeSpin.connect("valueChanged(double)", lambda v: self.normSession and
+                                         self.normSession.setCheckerSize(v))
         self.onMethodChanged()
         self.onNormEngineChanged()
         return page
@@ -2660,6 +2788,8 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         settings["initialization"] = self.normInitCombo.currentData
         if self.normEngine() == reg.ENGINE_ITERATIVE:
             settings.update(iterativeSettings(self.normIterative), engine=reg.ENGINE_ITERATIVE)
+            settings["iterativeFoldGuard"] = bool(self.normFoldCheck.checked)
+            settings["iterativeDeformableMaxShift"] = float(self.normMaxShiftSpin.value)
             settings["steps"] = reg.iterativeSteps(settings["iterativeLinear"], settings["iterativeDeformable"])
             return settings
         steps = [c.currentData for c in self.normStepCombos if c.currentData]
@@ -2814,18 +2944,15 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             slicer.util.errorDisplay(str(error), windowTitle="Normalization")
             return
         self._clearNormalization()
-        progressDialog = slicer.util.createProgressDialog(windowTitle="Normalization", labelText="Registering...",
-                                                          maximum=len(settings["steps"]))
-
-        def progress(index, total, text):
-            progressDialog.setValue(index)
-            progressDialog.setLabelText(f"Normalization: {text}")
-            slicer.app.processEvents()
-            return not progressDialog.wasCanceled
+        # the levels, iterations and live metric of the iterative engine (user 2026-11-27); BRAINSFit: its steps
+        from DICOMGatedDynamicPETLib.regprogress import RegistrationProgress
+        progressWindow = RegistrationProgress("Normalization")
+        progress = progressWindow.progress
 
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
             self.normResult = self.logic.normalize(sequence, template, method, anatomy, settings, mask, progress,
+                                                   onIteration=progressWindow.update,
                                                    ctTemplate=ctTemplate, ctCorrection=ctCorrection,
                                                    petImage=self.normImage(picked=True))
         except Exception as error:
@@ -2835,8 +2962,7 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         finally:
             qt.QApplication.restoreOverrideCursor()
-            progressDialog.close()
-            progressDialog.deleteLater()
+            progressWindow.close()
         if not self.normResult["steps"]:
             bspline = self.normResult.get("bspline")
             if bspline is not None and slicer.mrmlScene.IsNodePresent(bspline):
@@ -2918,6 +3044,7 @@ class NeuroWorkflowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             session = RegistrationSession(self.normResult["template"])
             session.fusionOpacity = self.normOpacity.value
             session.showCheckerboard = self.normCheckerCheck.checked
+            session.checkerMm = float(self.normCheckerSizeSpin.value)
             session.open(self.normImage())
             session.setRegistration(self.normResult["linear"], self.normResult["bspline"])
             session.setFixedWindow(*_percentiles(self.normResult["template"]))

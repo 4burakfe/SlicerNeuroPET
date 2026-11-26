@@ -30,6 +30,8 @@ set(NEURO_WORKFLOW_LIB_SCRIPTS
   NeuroWorkflowLib/base.py
   NeuroWorkflowLib/compare.py
   NeuroWorkflowLib/dynamicdb.py
+  NeuroWorkflowLib/dynreport.py
+  NeuroWorkflowLib/dyntoolbar.py
   NeuroWorkflowLib/database.py
   NeuroWorkflowLib/scenestate.py
   )

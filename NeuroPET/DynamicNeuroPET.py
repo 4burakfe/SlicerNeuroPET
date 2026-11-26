@@ -81,6 +81,8 @@ from NeuroWorkflowLib.database import (NormalizationDatabaseMixin, RegionsDataba
                                        NORMALIZATION_ATTRIBUTE, registerRegionsLayout, seriesInfo)
 from NeuroWorkflowLib.compare import ComparePageMixin, COMPARE_MAP_ROLE  # noqa: E402
 from NeuroWorkflowLib.dynamicdb import DynamicDatabaseLogicMixin  # noqa: E402
+from NeuroWorkflowLib.dynreport import DynamicReportMixin  # noqa: E402
+from NeuroWorkflowLib.dyntoolbar import ModelingToolbarMixin  # noqa: E402
 from NeuroPETLib import neuroreview as nr  # noqa: E402
 # the review of the Static Neuro module (its mixins) on the parametric maps: the Review/Compare step
 from StaticNeuroPETLib.constants import STEP_REVIEW  # noqa: E402
@@ -95,6 +97,7 @@ from StaticNeuroPETLib.review_cut import ReviewCutMixin  # noqa: E402
 from StaticNeuroPETLib.review_peel import ReviewPeelMixin  # noqa: E402
 from StaticNeuroPETLib.review_layout import ReviewLayoutMixin, registerReviewLayouts  # noqa: E402
 from StaticNeuroPETLib.review_mouse import ReviewMouseMixin  # noqa: E402
+from StaticNeuroPETLib.report import ReportMixin  # noqa: E402
 
 # the normalization methods: the summed PET to a PET template of a dynamic database too (its subjects' summed images)
 DYNAMIC_METHODS = METHODS + ((METHOD_PET_TEMPLATE, "Register the summed PET to the database's PET template"),)
@@ -150,7 +153,10 @@ class DynamicNeuroPETLogic(DynamicDatabaseLogicMixin, ReviewLogicMixin, Database
         return seriesInfo(sequence)
 
 
-class DynamicNeuroPETWidget(ComparePageMixin,
+class DynamicNeuroPETWidget(ModelingToolbarMixin,
+                            DynamicReportMixin,
+                            ReportMixin,
+                            ComparePageMixin,
                             ToolbarMixin,
                             NormalizationDatabaseMixin,
                             RegionsDatabaseMixin,
@@ -184,6 +190,7 @@ class DynamicNeuroPETWidget(ComparePageMixin,
         self._modelingPreset = None     # (database folder, series, regions) whose kinetics Modeling was set to
         NeuroWorkflowWidget.setup(self)
         self.pages[STEP_COMPARE] = self._buildComparePage()
+        self._connectSegmentsAction()       # the toolbar's Segments / Fusion buttons follow the page's checks
         self.refresh()
 
     # the workflow toolbar of the base (its step icons) with the review's tools (shown on the Review/Compare step)
@@ -195,8 +202,11 @@ class DynamicNeuroPETWidget(ComparePageMixin,
 
     def _buildToolbar(self):
         toolbar = NeuroWorkflowWidget._buildToolbar(self)
-        if toolbar is not None:
-            self._addReviewTools(toolbar)
+        if toolbar is not None:     # the Compare step's tools on a second row, as the Static review's
+            self._addReviewTools(toolbar, self._buildReviewRow("Dynamic Neuro compare"))
+            self._buildModelingRow()        # the Modeling step's row (report, screenshots, view settings)
+            toolbar.connect("visibilityChanged(bool)", lambda visible: (self._updateReviewTools(),
+                                                                        self._updateModelingTools()))
         return toolbar
 
     def stepStates(self):
@@ -215,6 +225,7 @@ class DynamicNeuroPETWidget(ComparePageMixin,
         self._updateAddDynBox()
         self._updateReviewPage()
         self._updateReviewTools()
+        self._updateModelingTools()
 
     # --- the workflow saved with the scene: the review layouts too ------------------------------------
     LAYOUT_STEPS = {**NeuroWorkflowWidget.LAYOUT_STEPS, **{layoutId: STEP_COMPARE for layoutId in nr.LAYOUT_IDS}}
@@ -263,6 +274,9 @@ class DynamicNeuroPETWidget(ComparePageMixin,
                 qt.QTimer.singleShot(200, self._autoCompare)
             return
         NeuroWorkflowWidget._callStep(self, key, method)
+        if key == STEP_MODEL and method in ("enter", "exit"):
+            self._showModelingReportBox(method == "enter")      # the workflow's report box under the panel
+            self._updateModelingTools(method == "enter")
 
     def _prepareModeling(self, widget):
         """The workflow's inputs; with a dynamic database picked, once per database and series, its kinetic model
@@ -351,6 +365,8 @@ class DynamicNeuroPETWidget(ComparePageMixin,
         if getattr(self, "current", None) == STEP_COMPARE:
             self._exitReviewViews()
         NeuroWorkflowWidget.cleanup(self)
+        self._removeReviewRow()
+        self._removeModelingRow()
 
     def onSceneClose(self, caller, event):
         NeuroWorkflowWidget.onSceneClose(self, caller, event)

@@ -20,7 +20,8 @@ StaticNeuroPETLib: the parts of the Static Neuro PET/SPECT module (StaticNeuroPE
     review_peel          unfolded brain
     review_layout        layouts, second monitor, review views, outlines
     review_mouse         hover names, right drag window, 3D-SSP outlines
-    report               the PDF report (its layout and drawing: NeuroPETLib.neuroreport)
+    report               the PDF / DICOM report and screenshots, shared with Dynamic (its layout and drawing:
+                         NeuroPETLib.neuroreport)
 
 The logic and widget files hold mixin classes (methods only); StaticNeuroPET.py makes StaticNeuroPETLogic and
 StaticNeuroPETWidget from them. Pure numpy code that can be tested without Slicer stays in NeuroPETLib.

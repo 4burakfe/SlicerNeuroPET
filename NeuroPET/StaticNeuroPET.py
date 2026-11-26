@@ -155,6 +155,7 @@ class StaticNeuroPETWidget(ToolbarMixin,
     BANNER_STEPS = (STEP_DATA, STEP_REVIEW)
     NORM_METHODS = METHODS
     NORM_IMAGE_CHOICE = False       # the static image itself is registered
+    NORM_DEFORMABLE = False         # affine only by default: the FDG databases were normalized with the affine only
     LOAD_REGIONS_TEXT = "Load regions and go to review"
     NORM_HARDEN_GRIDS = NORM_HARDEN_GRIDS
     NORM_HARDEN_ACTIONS = NORM_HARDEN_ACTIONS
@@ -268,11 +269,7 @@ class StaticNeuroPETWidget(ToolbarMixin,
         if getattr(self, "current", None) == STEP_REVIEW:
             self._exitReviewViews()
         NeuroWorkflowWidget.cleanup(self)
-        if getattr(self, "reviewToolbar", None) is not None:
-            slicer.util.mainWindow().removeToolBarBreak(self.reviewToolbar)
-            slicer.util.mainWindow().removeToolBar(self.reviewToolbar)
-            self.reviewToolbar.deleteLater()
-            self.reviewToolbar = None
+        self._removeReviewRow()
 
     def onSceneClose(self, caller, event):
         NeuroWorkflowWidget.onSceneClose(self, caller, event)

@@ -89,8 +89,18 @@ without, the result is kept, or stay).
 4. **Normalization** to the **MNI ICBM 152 nonlinear symmetric 2009c** template (the method, template and
    registration settings under **Normalization settings**, folded at start; a PET template, the synthetic PET or a
    database's mean PET, is shown in inverted grey here and in the Regions step). By default the **iterative
-   multi-resolution** engine runs **one affine stage** down to a **1 mm** final level with the **Thorough** sampling
-   (about 4 GB of memory and fast; the deformable passes, B-spline grid 30 mm, can be turned on). **BRAINSFit** can be
+   multi-resolution** engine runs **one affine stage** down to a **2 mm** final level with the **Thorough** sampling;
+   the deformable pass is **off by default** in both workflows (*Then deformable*). When turned on it is one B-spline
+   pass (control points at the picked grid, 30 mm by default, 10 mm the finest; on images of 8, 4 and 2 mm with the
+   control points 4x, 2x and 1x the grid; at most 100 iterations per level; with *Prevent folding* each control point
+   moves at most *Max control point shift* x the grid, 0.25 by default, and a pass that still folds is scaled down
+   to 1/2, 1/4 before it is dropped). *Quality* is a fraction of each level's voxels in every stage (Fastest 0.3 %,
+   Fast 1 %, Standard 3 %, Thorough 10 %, at least 5000 samples); *Deformable grid* is the B-spline's only, *Final
+   resolution* the last level of the linear stage. The progress window shows the levels of the run, an overall
+   bar, the iterations of the current level and its metric drawn live (mutual information, lower is better). An
+   affine is one transform for the whole brain: in an atrophic brain with large ventricles the caudate may slide into
+   the ventricles, which the deformable pass can help; a patient with a marked focal loss may be pulled a little
+   toward the template by it. **BRAINSFit** can be
    picked instead: **rigid + scale + skew** (BRAINSFit `ScaleSkewVersor3D`; *Affine* can be picked) **then B-spline**.
    BRAINSFit registers copies of the template and of the CT/MR (or PET) **smoothed and resampled to 2 mm**
    (*Register at*, as FSL's 2 mm MNI template; 0 for the images as they are); the transform applies to the original
